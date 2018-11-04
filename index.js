@@ -27,7 +27,7 @@ function extractUrls(urls){
     let cleanArray = urls.split("\n");
     let usedLinks = []
     for (let index = 0; index < cleanArray.length; index++) {
-      if(cleanArray[index].startsWith(url))
+      if(cleanArray[index].startsWith(url) && ! isArabic(cleanArray[index].split(url)[1]))
       usedLinks.push(cleanArray[index].split(url)[1])
     }
     return usedLinks;
@@ -49,22 +49,29 @@ function generateFile(tasks){
   return `
   from locust import HttpLocust, TaskSet, task
 
-class WebsiteTasks(TaskSet):
-    def on_start(self):
-    self.client.get("/")
+
+class UserBehavior(TaskSet):
+
+    def fon_start(self):
+        self.login()
+
+    def flogin(self):
+        self.client.get("/")
+
     
     ${tasks}
 
 class WebsiteUser(HttpLocust):
-    task_set = WebsiteTasks
+    task_set = UserBehavior
     min_wait = 5000
-    max_wait = 15000
+    max_wait = 9000
+
   `
 }
 
 function extractFile(python){
   
-fs.writeFile("./locustfile.py", unicodeEscape(python),'utf8', function(err) {
+fs.writeFile("./locustfile.py", python,'utf8', function(err) {
     if(err) {
         return console.log(err);
     }
@@ -72,11 +79,9 @@ fs.writeFile("./locustfile.py", unicodeEscape(python),'utf8', function(err) {
 }); 
 }
 
-function unicodeEscape(str) {
-	return str.replace(/[\s\S]/g, function(character) {
-		var escape = character.charCodeAt().toString(16),
-		    longhand = escape.length > 2;
-		return '\\' + (longhand ? 'u' : 'x') + ('0000' + escape).slice(longhand ? -4 : -2);
-	});
+function isArabic(text) {
+  var pattern = /[\u0600-\u06FF\u0750-\u077F]/;
+  result = pattern.test(text);
+  return result;
 }
 
