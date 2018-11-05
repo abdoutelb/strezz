@@ -47,7 +47,7 @@ function generateTasks(links){
 
 function generateFile(tasks){
   return `
-  from locust import HttpLocust, TaskSet, task
+from locust import HttpLocust, TaskSet, task
 
 
 class UserBehavior(TaskSet):
