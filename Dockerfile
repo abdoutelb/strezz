@@ -1,12 +1,9 @@
-RUN sudo apt-get update
-
-RUN sudo apt-get install python-pip python-dev build-essential 
-
-RUN sudo pip install --upgrade pip 
-
-RUN pip install locustio
-
 FROM node:8
+
+RUN sudo apt-get update \
+ && apt-get install python-pip python-dev build-essential \
+ &&  pip install locustio \
+
 # Create app directory
 WORKDIR /usr/local/stress
 # Bundle app source
