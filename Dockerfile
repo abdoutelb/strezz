@@ -1,18 +1,17 @@
 FROM node:8
 
-RUN sudo apt-get update \
- && apt-get install python-pip python-dev build-essential \
- &&  pip install locustio \
+#RUN  apt-get -y update \
+# && apt-get -y install python-pip python-dev build-essential \
+# &&  pip  install locustio \
 
 # Create app directory
-WORKDIR /usr/local/stress
+WORKDIR /usr/local
 # Bundle app source
 COPY . .
 
 EXPOSE 3000
 
-RUN cd /usr/local/stress
 
-CMD [ "URL=$0 node", "index.js" ]
+CMD [ "URL=$URL node", "index.js" ]
 
-RUN locust -f locustfile.py --host=$0 -P 3000
+#RUN locust -f locustfile.py --host=$URL -P 3000
