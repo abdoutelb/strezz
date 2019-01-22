@@ -1,11 +1,11 @@
 # stressTest
 stress test for any website
 
-TO RUN the solution 
-*)- use `URL=http://www.akhbarak.net node index.js`
+TO RUN the solution replace `URL` with your site
+*)- use `URL=URL node index.js`
 
-*) `docker build -t stress-web --build-arg SITE_URL=http://www.akhbarak.net/ .`
+*) `docker build -t stress-web --build-arg SITE_URL=URL .`
 
-*) `docker run -itd YOURDOCKERIMAGE`
+*) `docker run -itd --name stress-web` 
 
 check your `localhost:40000`
