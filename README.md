@@ -6,6 +6,6 @@ TO RUN the solution replace `URL` with your site
 
 *) `docker build -t stress-web --build-arg SITE_URL=URL .`
 
-*) `docker run -itd -label stress-web:latest -P 4000:4000` 
+*) `docker run -itd -p 4000:4000 -label stress-web:latest` 
 
 check your `localhost:4000`
