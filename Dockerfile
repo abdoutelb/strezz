@@ -6,15 +6,24 @@ RUN  apt-get update  && apt-get  install -y apt-transport-https \
  &&  pip install locustio 
 # Bundle app source
 
+RUN curl --silent --location https://deb.nodesource.com/setup_8.x | bash -
+RUN apt-get install --yes nodejs
+RUN apt-get install --yes build-essential
 
-
-COPY . .
-
-EXPOSE 4000
 # this is the build args parameter should be the same name
 ARG url    
 ENV SITE_URL=${url}
 
+COPY /index.js .
+
+RUN URL=$SITE_URL node index.js
+
+EXPOSE 4000
+
+
+
+
+#RUN URL=$SITE_URL node index.js
 
 # this should be always simple string
 CMD locust -f /loc.py --host=$SITE_URL -P 4000
