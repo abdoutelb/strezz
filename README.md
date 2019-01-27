@@ -1,11 +1,12 @@
-# stressTest
-stress test for any website
+This project is used to make a stress test to web sites
+# Stress Test
 
-TO RUN the solution replace `URL` with your site
-*)- use `URL=URL node index.js`
+TO RUN the solution replace `URL` with your site build & run the container
 
-*) `docker build -t stress-web --build-arg SITE_URL=URL .`
+*) `docker build -t stress --build-arg url=http://www.akhbarak.net/ .`
 
-*) `docker run -itd -p 4000:4000 -label stress-web:latest` 
+*) `docker run -itd -p 4000:4000 -label stress:latest` 
 
 check your `localhost:4000`
+
+HAVE FUN !!!
