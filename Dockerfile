@@ -22,5 +22,5 @@ EXPOSE 4000
 # this should be always simple string
 CMD locust -f /loc.py --host=$SITE_URL -P 4000
 
-#TO buld the images  docker build -t stress --build-arg url=http://www.akhbarak.net/ .
+#TO buld the images  docker build -t stress --build-arg url=URL .
 #TO run the container docker run -itd -p 4000:4000 -label stress:latest
