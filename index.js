@@ -27,8 +27,8 @@ function extractUrls(urls){
     let cleanArray = urls.split("\n");
     let usedLinks = []
     for (let index = 0; index < cleanArray.length; index++) {
-      if(cleanArray[index].startsWith(url) && ! isArabic(cleanArray[index].split(url)[1]))
-      usedLinks.push(cleanArray[index].split(url)[1])
+      if(cleanArray[index].startsWith(url))
+      usedLinks.push(encodeURI(cleanArray[index].split(url)[1]))
     }
     return usedLinks;
     } 
