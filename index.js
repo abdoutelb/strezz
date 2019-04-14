@@ -1,6 +1,7 @@
 const https = require('https');
 const url = process.env.URL;
 const fs = require('fs');
+const helpers = require('./helpers');
 
 https.get(`https://api.hackertarget.com/pagelinks/?q=${url}`, (resp) => {
   let data = '';
@@ -13,8 +14,8 @@ https.get(`https://api.hackertarget.com/pagelinks/?q=${url}`, (resp) => {
   resp.on('end', () => {
     
     let cleanUrls =  extractUrls(data)
-    let tasks = generateTasks(cleanUrls);
-    let pythonFile = generateFile(tasks);
+    let tasks = helpers.generateTasks(cleanUrls);
+    let pythonFile = helpers.generateFile(tasks);
     extractFile(pythonFile);
   });
 
@@ -32,43 +33,7 @@ function extractUrls(urls){
     }
     return usedLinks;
     } 
-    
-function generateTasks(links){
-  let result = '';
-  for (let index = 1; index <= links.length; index++) {
-    result += `@task(${index})
-    def f${index}(self):
-     self.client.get("${links[index]}")
-         
-    `
-  }
-  return result;
-};    
-
-function generateFile(tasks){
-  return `
-from locust import HttpLocust, TaskSet, task
-
-
-class UserBehavior(TaskSet):
-
-    def fon_start(self):
-        self.login()
-
-    def flogin(self):
-        self.client.get("/")
-
-    
-    ${tasks}
-
-class WebsiteUser(HttpLocust):
-    task_set = UserBehavior
-    min_wait = 5000
-    max_wait = 9000
-
-  `
-}
-
+        
 function extractFile(python){
   
 fs.writeFile("./loc.py", python,'utf8', function(err) {
@@ -79,9 +44,5 @@ fs.writeFile("./loc.py", python,'utf8', function(err) {
 }); 
 }
 
-function isArabic(text) {
-  var pattern = /[\u0600-\u06FF\u0750-\u077F]/;
-  result = pattern.test(text);
-  return result;
-}
+
 
