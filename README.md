@@ -1,5 +1,5 @@
 This project is used to make a stress test to web sites
-# Stress Test
+# Strezz
 
 TO RUN the solution replace `URL` with your site build & run the container
 
