@@ -9,4 +9,6 @@ TO RUN the solution replace `URL` with your site build & run the container
 
 check your `localhost:4000`
 
+To run all tests run `jest` from CLI
+
 HAVE FUN !!!
