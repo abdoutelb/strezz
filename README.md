@@ -1,5 +1,5 @@
 This project is used to make a stress test to web sites
-# Stress Test
+# Strezz
 
 TO RUN the solution replace `URL` with your site build & run the container
 
@@ -8,5 +8,7 @@ TO RUN the solution replace `URL` with your site build & run the container
 *) `docker run -itd -p 4000:4000 -label stress:latest` 
 
 check your `localhost:4000`
+
+To run all tests run `jest` from CLI
 
 HAVE FUN !!!
