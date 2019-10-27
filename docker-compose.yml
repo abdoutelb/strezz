@@ -1,10 +1,10 @@
-version: '3'
-services: 
- stress:
-  image: stress:latest
-  build :
-    context: .
-  ports: 
-    - 4000:4000
-  volumes:
+version: "3"
+services:
+  stress:
+    image: stress:latest
+    build:
+      context: .
+    ports:
+      - 4000:4000
+    volumes:
       - .:/usr/local/

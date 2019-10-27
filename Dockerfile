@@ -1,9 +1,9 @@
 FROM ubuntu:16.04
 
 RUN  apt-get update  && apt-get  install -y apt-transport-https \
- && apt-get  install -y curl \
- && apt-get  install -y python-pip python-dev build-essential \
- &&  pip install locustio 
+    && apt-get  install -y curl \
+    && apt-get  install -y python-pip python-dev build-essential \
+    &&  pip install locustio 
 # Bundle app source
 
 RUN curl --silent --location https://deb.nodesource.com/setup_8.x | bash -
@@ -14,6 +14,7 @@ ARG url
 ENV SITE_URL=${url}
 
 COPY /index.js .
+COPY /helpers.js .
 
 RUN URL=$SITE_URL node index.js
 
