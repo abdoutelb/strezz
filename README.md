@@ -1,4 +1,4 @@
-This project is used to make a stress test to web sites
+This project is used to make a stress test to web sites Based on [locust](https://locust.io/)
 # Strezz
 
 
