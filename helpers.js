@@ -35,16 +35,14 @@ function generateTasks(links) {
 
 function generateFile(tasks) {
   return `
-from locust import Locust, TaskSet, task, between, HttpLocust
+import random
+from locust import HttpUser, task, between
 
 
-class UserBehavior(TaskSet):
+class QuickstartUser(HttpUser):
+    wait_time = between(5, 9)
 
     ${tasks}
-
-class WebsiteUser(HttpLocust):
-    task_set = UserBehavior
-    wait_time = between(5, 15)
 
   `;
 }
