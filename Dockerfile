@@ -1,9 +1,9 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 RUN  apt-get update  && apt-get  install -y apt-transport-https \
     && apt-get  install -y curl \
-    && apt-get  install -y python-pip python-dev build-essential \
-    &&  pip install locustio 
+    && apt-get  install -y python3-pip python3-dev build-essential \
+    &&  pip3 install locust
 # Bundle app source
 
 RUN curl --silent --location https://deb.nodesource.com/setup_8.x | bash -
