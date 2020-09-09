@@ -1,6 +1,9 @@
 This project is used to make a stress test to web sites Based on [locust](https://locust.io/)
-# Strezz
 
+
+# Strezz
+[![CircleCI](https://circleci.com/gh/circleci/circleci-docs.svg?style=shield)](https://circleci.com/gh/circleci/circleci-docs)
+[![codecov](https://codecov.io/gh/abdoutelb/strezz/branch/master/graph/badge.svg)](https://codecov.io/gh/abdoutelb/strezz)
 
 - Edit `.env` file with your testing url.
 
