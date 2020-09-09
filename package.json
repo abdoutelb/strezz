@@ -1,0 +1,8 @@
+{
+  "name": "strezz",
+  "version": "0.1.1",
+  "author": "abdoutelb",
+  "jest": {
+    "verbose": true
+  }
+}
