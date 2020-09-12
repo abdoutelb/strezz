@@ -2,7 +2,7 @@ This project is used to make a stress test to web sites Based on [locust](https:
 
 
 # Strezz
-[![CircleCI](https://circleci.com/gh/circleci/circleci-docs.svg?style=shield)](https://circleci.com/gh/circleci/circleci-docs)
+![CircleCI](https://circleci.com/gh/abdoutelb/strezz.svg?style=svg)
 [![codecov](https://codecov.io/gh/abdoutelb/strezz/branch/master/graph/badge.svg)](https://codecov.io/gh/abdoutelb/strezz)
 [![DeepSource](https://static.deepsource.io/deepsource-badge-light-mini.svg)](https://deepsource.io/gh/abdoutelb/strezz/?ref=repository-badge)
 
