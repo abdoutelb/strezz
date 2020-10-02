@@ -4,5 +4,8 @@
   "author": "abdoutelb",
   "jest": {
     "verbose": true
+  },
+  "devDependencies": {
+    "jest": "^26.4.2"
   }
 }
