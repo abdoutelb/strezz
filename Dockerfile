@@ -6,7 +6,7 @@ RUN  apt-get update  && apt-get  install -y apt-transport-https \
     &&  pip3 install locust
 # Bundle app source
 
-RUN curl --silent --location https://deb.nodesource.com/setup_8.x | bash -
+RUN curl --silent --location https://deb.nodesource.com/setup_14.x | bash -
 RUN apt-get install --yes nodejs
 
 # this is the build args parameter should be the same name
