@@ -18,7 +18,7 @@ describe("read python file", () => {
     expect(helpers.extractFile).toBeDefined();
   });
   it("should be defined", () => {
-    expect(helpers.extractFile()).toEqual(undefined);
+    expect(helpers.extractFile("")).toEqual(undefined);
   });
   it("should be a function", () => {
     expect(helpers.extractFile).toBeInstanceOf(Function);
