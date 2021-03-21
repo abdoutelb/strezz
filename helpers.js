@@ -14,9 +14,8 @@ function extractUrls(urls, ENV_URL) {
 function extractFile(python) {
   fs.writeFile("./loc.py", python, "utf8", function(err) {
     if (err) {
-      return console.log(err);
+    throw new Error(err);
     }
-    console.log("done !");
   });
 }
 
@@ -55,5 +54,5 @@ try {
     generateFile: generateFile
   };
 } catch (error) {
-  console.log("We caught error");
+  throw new Error("We caught error");
 }
