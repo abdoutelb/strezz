@@ -3,9 +3,9 @@ const ENV_URL = process.env.URL;
 const helpers = require("./helpers");
 
 https
-  .get(`https://api.hackertarget.com/pagelinks/?q=${ENV_URL}`, resp => {
+  .get(`https://api.hackertarget.com/pagelinks/?q=${ENV_URL}`, (resp) => {
     let data = "";
-    resp.on("data", chunk => {
+    resp.on("data", (chunk) => {
       data += chunk;
     });
 
@@ -16,6 +16,6 @@ https
       helpers.extractFile(pythonFile);
     });
   })
-  .on("error", err => {
+  .on("error", (err) => {
     throw new Error("Error: " + err.message);
   });

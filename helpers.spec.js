@@ -1,12 +1,11 @@
 const helpers = require("./helpers");
 
-
 describe("extract urls from url", function () {
   it("should be defined", function () {
     expect(helpers.extractUrls).toBeDefined();
   });
   it("test output to be defined", function () {
-    expect(helpers.extractUrls("/about\n/test\n/google","google")).toEqual([]);
+    expect(helpers.extractUrls("/about\n/test\n/google", "google")).toEqual([]);
   });
   it("should be a function", function () {
     expect(helpers.extractUrls).toBeInstanceOf(Function);

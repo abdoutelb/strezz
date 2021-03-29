@@ -1,6 +1,5 @@
 const fs = require("fs");
 
-
 function extractUrls(urls, ENV_URL) {
   let cleanArray = urls.split("\n");
   let usedLinks = [];
@@ -12,9 +11,9 @@ function extractUrls(urls, ENV_URL) {
 }
 
 function extractFile(python) {
-  fs.writeFile("./loc.py", python, "utf8", function(err) {
+  fs.writeFile("./loc.py", python, "utf8", function (err) {
     if (err) {
-    throw new Error(err);
+      throw new Error(err);
     }
   });
 }
@@ -51,7 +50,7 @@ try {
     extractUrls: extractUrls,
     extractFile: extractFile,
     generateTasks: generateTasks,
-    generateFile: generateFile
+    generateFile: generateFile,
   };
 } catch (error) {
   throw new Error("We caught error");

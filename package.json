@@ -3,9 +3,16 @@
   "version": "0.1.1",
   "author": "abdoutelb",
   "scripts": {
-    "test": "jest --coverage"
+    "test": "jest ",
+    "test:coverage": "jest --collect-coverage --token=68df5ea7-f0cf-4404-9bf5-260e2094249f",
+    "format": "prettier --ignore-path .gitignore --write \"**/*.+(js|json)\""
   },
   "devDependencies": {
-    "jest": "^26.6.3"
+    "codecov": "^3.8.1",
+    "jest": "^26.6.3",
+    "prettier": "^2.2.1"
+  },
+  "dependencies": {
+    "eslint": "^7.22.0"
   }
 }
