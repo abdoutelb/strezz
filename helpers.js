@@ -1,11 +1,11 @@
 const fs = require("fs");
 
 function extractUrls(urls, ENV_URL) {
-  let cleanArray = urls.split("\n");
+  let cleanArray = urls;
   let usedLinks = [];
   for (let index = 0; index < cleanArray.length; index++) {
-    if (cleanArray[index].startsWith(ENV_URL))
-      usedLinks.push(encodeURI(cleanArray[index].split(ENV_URL)[1]));
+    if (cleanArray[index] !== undefined && cleanArray[index].startsWith("/"))
+      usedLinks.push(encodeURI(cleanArray[index]));
   }
   return usedLinks;
 }
