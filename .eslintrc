@@ -1,0 +1,10 @@
+{
+    "parserOptions" : {
+        "ecmaVersion" : 2019,
+        "sourceType" : "module"
+    },
+    "rules": {
+        "strict" : ["error","never"],
+        "valid-typeof" : "warn"
+    } 
+}

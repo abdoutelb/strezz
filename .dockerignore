@@ -1,2 +1,5 @@
-locustfile.py
 .vscode
+loc.py
+node_modules/
+coverage/
+.env

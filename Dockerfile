@@ -13,8 +13,9 @@ RUN apt-get install --yes nodejs
 ARG url    
 ENV SITE_URL=${url}
 
-COPY /index.js .
-COPY /helpers.js .
+COPY . .
+
+RUN npm install 
 
 RUN URL=$SITE_URL node index.js
 

@@ -1,11 +1,11 @@
 version: "3"
 services:
-    stress:
+    strezz:
       env_file:
       - .env  
       build:
         args:
-            url: "${URI}"
+            url: "${url}"
         context: .
       ports:
         - 4000:4000
