@@ -1,4 +1,4 @@
-const ENV_URL = process.env.URL;
+const ENV_URL = process.env.url;
 const helpers = require("./helpers");
 const extracter = require("./extracter");
 
