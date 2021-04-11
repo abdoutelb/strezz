@@ -17,12 +17,11 @@ COPY . .
 
 RUN npm install 
 
-RUN URL=$SITE_URL node index.js
+RUN url=$SITE_URL node index.js
 
 EXPOSE 4000
 
-# this should be always simple string
-CMD locust -f /loc.py --host=$SITE_URL -P 4000
 
-#TO buld the images  docker build -t stress --build-arg url=URL .
-#TO run the container docker run -itd -p 4000:4000 -label stress:latest
+CMD locust -f /loc.py --host=$SITE_URL -P 4000
+#For debugging
+#ENTRYPOINT ["tail", "-f", "/dev/null"]
