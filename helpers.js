@@ -20,7 +20,7 @@ function extractFile(python) {
 
 function generateTasks(links) {
   let result = "";
-  for (let index = 1; index <= links.length; index++) {
+  for (let index = 1; index < links.length; index++) {
     result += `
     @task(${index})
     def f${index}(self):

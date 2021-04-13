@@ -9,7 +9,7 @@ This project is used to make a stress test to web sites Based on [locust](https:
 - Edit `.env` file with your testing url.
 
 Using docker compose
-- `docker-compose up  --build`
+- `docker-compose up`
  
 - check your `localhost:4000`
 
