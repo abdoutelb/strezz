@@ -5,7 +5,7 @@ describe("extract urls from url", function () {
     expect(helpers.extractUrls).toBeDefined();
   });
   it("test output to be defined", function () {
-    expect(helpers.extractUrls("/about\n/test\n/google", "google")).toEqual([]);
+    expect(helpers.extractUrls("/about\n/test\n/google")).toBeInstanceOf(Array);
   });
   it("should be a function", function () {
     expect(helpers.extractUrls).toBeInstanceOf(Function);

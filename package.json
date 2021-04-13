@@ -3,8 +3,8 @@
   "version": "0.1.1",
   "author": "abdoutelb",
   "scripts": {
-    "test": "jest ",
-    "test:coverage": "jest --collect-coverage --token=68df5ea7-f0cf-4404-9bf5-260e2094249f",
+    "test": "jest",
+    "test:coverage": "jest --ci --collect-coverage --token=68df5ea7-f0cf-4404-9bf5-260e2094249f && codecov",
     "format": "prettier --ignore-path .gitignore --write \"**/*.+(js|json)\""
   },
   "devDependencies": {
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.6",
-    "eslint": "^7.22.0",
+    "eslint": "^7.24.0",
     "got": "^11.8.2"
   }
 }
