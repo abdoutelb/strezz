@@ -1,5 +1,7 @@
 This project is used to make a stress test to web sites Based on [locust](https://locust.io/)
 
+Mainly it generates a python file needed to locaust to run stress test.
+
 
 # Strezz
 ![CircleCI](https://circleci.com/gh/abdoutelb/strezz.svg?style=svg)
