@@ -18,5 +18,5 @@ const extractLinks = async (url) => {
 };
 
 module.exports = {
-    extractLinks: extractLinks,
+  extractLinks: extractLinks,
 };

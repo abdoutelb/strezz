@@ -7,7 +7,9 @@ describe("extractor function", () => {
   it("should throw error while empty params", async () => {
     expect(await helpers.extractLinks()).toEqual("urls not found");
   });
-  it("should be a function", async() => {
-    expect(await helpers.extractLinks("https://www.google.com/")).toBeInstanceOf(Array);
+  it("should be a function", async () => {
+    expect(
+      await helpers.extractLinks("https://www.google.com/")
+    ).toBeInstanceOf(Array);
   });
 });
