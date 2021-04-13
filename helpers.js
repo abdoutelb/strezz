@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-function extractUrls(urls, ENV_URL) {
+function extractUrls(urls) {
   let cleanArray = urls;
   let usedLinks = [];
   for (let index = 0; index < cleanArray.length; index++) {
