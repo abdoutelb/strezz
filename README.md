@@ -9,7 +9,7 @@ Mainly it generates a python file needed to locaust to run stress test.
 [![DeepSource](https://static.deepsource.io/deepsource-badge-light-mini.svg)](https://deepsource.io/gh/abdoutelb/strezz/?ref=repository-badge)
 [![Language grade: JavaScript](https://img.shields.io/lgtm/grade/javascript/g/abdoutelb/strezz.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/abdoutelb/strezz/context:javascript)
 
-- Edit `.env` file with your testing url.
+- Edit `.env` file with your testing url. (ex:url=https://google.com/)
 
 Using docker compose
 - `docker-compose up`
