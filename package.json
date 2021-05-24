@@ -13,7 +13,7 @@
     "prettier": "^2.2.1"
   },
   "dependencies": {
-    "cheerio": "^1.0.0-rc.6",
+    "cheerio": "^1.0.0-rc.9",
     "eslint": "^7.27.0",
     "got": "^11.8.2"
   }
