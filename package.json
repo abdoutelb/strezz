@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.6",
-    "eslint": "^7.32.0",
+    "eslint": "^8.3.0",
     "got": "^11.8.2"
   }
 }
