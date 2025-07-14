@@ -13,6 +13,7 @@ Mainly it generates a python file needed to locaust to run stress test.
 
 Using docker compose
 - `docker-compose up`
+
  
 - check your `localhost:4000`
 
