@@ -94,6 +94,7 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
             run_id: current.run_id,
             active_users: shared.active.load(Ordering::Relaxed),
             delta,
+            capacity: None,
         };
         let next = match post::<_, Assignment>(&control, api("api/sync"), &opts.token, &req).await {
             Ok(a) => a,

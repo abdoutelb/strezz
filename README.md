@@ -28,7 +28,14 @@ the load across every device that joins:
 
 - **Capacity.** Each native worker raises its own `RLIMIT_NOFILE` as far as the OS allows (up to
   `kern.maxfilesperproc` on macOS, `fs.nr_open` on Linux). It then reports how many concurrent
-  users it can hold. A browser worker reports what you type on its page, 6 by default.
+  users it can hold.
+- **Browser capacity.** A browser worker picks its starting capacity from the device's own CPU
+  cores, memory and network type. With **auto-tune** on (the default), it keeps raising capacity
+  during a run while throughput rises. It backs off when the browser lags, latency balloons, or
+  errors rise, and reports the new capacity to the coordinator on every sync.
+- **Full fleet capacity.** Tick *Full fleet capacity* on the dashboard (or send `users: 0`) and
+  every device runs as many users as it can. Devices that join later, and capacity raised by
+  auto-tune, are picked up live.
 - **Allocation.** The coordinator splits the total users with equal-share water-filling. Every
   device gets the same share, capped at its own capacity, and whatever a small device can't hold
   goes to the others. Devices that stop syncing for 5 seconds get their users reassigned.
@@ -92,8 +99,8 @@ controller.
 
 Browsers can't read cross-origin responses, so requests use `fetch(..., {mode: "no-cors"})`. The
 target still receives real load, but a browser worker can only count network errors and timeouts,
-not HTTP status codes. Browsers also open about 6 connections per host over HTTP/1.1. If the
-target speaks HTTP/2 or HTTP/3, raise the capacity on the join page.
+not HTTP status codes. Browsers also open about 6 connections per host over HTTP/1.1; auto-tune
+detects this from the queueing latency and stops raising capacity there.
 
 ## Docker Compose
 
@@ -120,8 +127,8 @@ All endpoints need the token, either in the `x-strezz-token` header or as `?toke
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/register` | `{name, kind: native\|browser, capacity, platform}` → `{worker_id}` |
-| POST | `/api/sync` | `{worker_id, run_id, active_users, delta}` → assignment |
-| POST | `/api/run/start` | `{users, spawn_rate, duration_secs, wait_min_ms, wait_max_ms, timeout_ms}` |
+| POST | `/api/sync` | `{worker_id, run_id, active_users, delta, capacity?}` → assignment |
+| POST | `/api/run/start` | `{users (0 = full capacity), spawn_rate, duration_secs, wait_min_ms, wait_max_ms, timeout_ms}` |
 | POST | `/api/run/stop` | stop the current run |
 | GET | `/api/status` | fleet, run stats, per-second timeline |
 

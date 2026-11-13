@@ -84,7 +84,9 @@
       <div class="card">
         <h2>Run</h2>
         <form id="form">
-          <label>Total users<input name="users" type="number" min="1" value="200"></label>
+          <label>Total users<input name="users" id="users" type="number" min="1" value="200"></label>
+          <label style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px;color:var(--fg);font-size:13px">
+            <input type="checkbox" id="maxmode" style="width:auto"> Full fleet capacity: every device runs as many users as it can</label>
           <label>Spawn rate /s<input name="spawn_rate" type="number" min="1" value="50"></label>
           <label>Duration (s, 0 = ∞)<input name="duration_secs" type="number" min="0" value="60"></label>
           <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
@@ -120,6 +122,7 @@ const fmt = (n) => Math.round(n).toLocaleString();
 const ms = (v) => v ? (v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(2) + " s") : "–";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 let last = null, joinShown = "", chosenBase = null;
+$("maxmode").onchange = () => { $("users").disabled = $("maxmode").checked; };
 const LOOPBACK = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"];
 // If this dashboard was opened via a LAN address, that address is proven reachable.
 const pageBase = LOOPBACK.includes(location.hostname) ? null : location.origin;
@@ -128,6 +131,7 @@ $("addr").onchange = () => { chosenBase = $("addr").value; refresh(); };
 $("form").onsubmit = async (e) => {
   e.preventDefault();
   const body = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, Number(v)]));
+  if ($("maxmode").checked) body.users = 0;
   const r = await fetch("/api/run/start", { method: "POST", headers: H, body: JSON.stringify(body) });
   if (!r.ok) alert(await r.text());
   refresh();
@@ -191,11 +195,11 @@ async function refresh() {
     $("t-fail").textContent = run.requests ? (100 * run.failures / run.requests).toFixed(1) + "%" : "0%";
     $("t-p50").textContent = ms(run.p50_ms); $("t-p95").textContent = ms(run.p95_ms); $("t-p99").textContent = ms(run.p99_ms);
     $("t-total").textContent = fmt(run.requests); $("t-elapsed").textContent = run.elapsed_secs + "s";
-    $("runstate").textContent = (run.active ? "Running" : "Finished") + " · run " + run.id + " · " + run.config.users + " users";
+    $("runstate").textContent = (run.active ? "Running" : "Finished") + " · run " + run.id + " · " + (run.config.users || "max") + " users";
     $("errors").innerHTML = run.errors.length ? run.errors.map(([k, v]) => esc(k) + ": <b>" + fmt(v) + "</b>").join("<br>") : "None";
     drawChart(run.timeline);
     const want = run.config.users;
-    $("capwarn").hidden = !(run.active && want > s.fleet_capacity);
+    $("capwarn").hidden = !(run.active && want > 0 && want > s.fleet_capacity);
     $("capwarn").textContent = "The fleet can hold " + fmt(s.fleet_capacity) + " of " + fmt(want) + " users. Add more devices to reach the full load.";
   } else drawChart([]);
 

@@ -48,6 +48,9 @@ pub struct SyncRequest {
     /// Stats collected since the previous sync.
     #[serde(default)]
     pub delta: Stats,
+    /// Updated capacity, for workers that tune themselves (browser auto-tune).
+    #[serde(default)]
+    pub capacity: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,7 +89,8 @@ impl Assignment {
 /// Body of `POST /api/run/start`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRun {
-    /// Total virtual users across the whole fleet.
+    /// Total virtual users across the whole fleet; 0 = every device runs at
+    /// its full capacity (follows capacity changes and devices joining).
     pub users: u32,
     /// Fleet-wide users added per second while ramping up.
     #[serde(default = "default_spawn_rate")]

@@ -105,7 +105,8 @@ impl Coordinator {
         let mut fleet: Vec<(String, u32)> =
             self.alive().map(|w| (w.id.clone(), w.capacity)).collect();
         fleet.sort();
-        allocate(run.config.users, &fleet)
+        let total = if run.config.users == 0 { u32::MAX } else { run.config.users };
+        allocate(total, &fleet)
     }
 
     fn assignment_for(&self, worker_id: &str) -> Assignment {
@@ -114,13 +115,16 @@ impl Coordinator {
         };
         let alloc = self.allocation();
         let users = alloc.get(worker_id).copied().unwrap_or(0);
-        let share = if run.config.users == 0 { 0.0 } else { users as f64 / run.config.users as f64 };
+        let allocated: u64 = alloc.values().map(|n| *n as u64).sum();
+        let share = if allocated == 0 { 0.0 } else { users as f64 / allocated as f64 };
         Assignment {
             run_id: run.id,
             target: self.target.clone(),
             paths: self.paths.clone(),
             users,
-            spawn_per_sec: (run.config.spawn_rate * share).max(1.0),
+            // Its share of the fleet spawn rate, but fast enough that even a small
+            // device next to a huge one fills its allocation within ~20s.
+            spawn_per_sec: (run.config.spawn_rate * share).max(users as f64 / 20.0).max(1.0),
             wait_min_ms: run.config.wait_min_ms,
             wait_max_ms: run.config.wait_max_ms.max(run.config.wait_min_ms),
             timeout_ms: run.config.timeout_ms,
@@ -164,6 +168,9 @@ impl Coordinator {
         w.last_seen = now;
         w.last_sync = now;
         w.active_users = req.active_users;
+        if let Some(cap) = req.capacity.filter(|c| *c > 0) {
+            w.capacity = cap;
+        }
         w.rps = req.delta.requests as f64 / dt;
         w.totals.merge(&req.delta);
 
@@ -186,7 +193,7 @@ impl Coordinator {
         self.next_run_id += 1;
         println!(
             "> run {id}: {} users @ {}/s across {} workers (capacity {}), duration {}",
-            cfg.users,
+            if cfg.users == 0 { "max".to_string() } else { cfg.users.to_string() },
             cfg.spawn_rate,
             self.alive().count(),
             self.fleet_capacity(),
@@ -430,9 +437,6 @@ async fn start(
     if !authorized(&state, &headers, &q) {
         return unauthorized();
     }
-    if cfg.users == 0 {
-        return (StatusCode::BAD_REQUEST, "users must be > 0").into_response();
-    }
     let mut c = state.lock().unwrap();
     c.stop();
     let id = c.start(cfg);
@@ -504,7 +508,7 @@ mod tests {
             for _ in 0..n {
                 delta.record(12.0, 10, None);
             }
-            c.sync(SyncRequest { worker_id: id.into(), run_id, active_users: 0, delta }).unwrap()
+            c.sync(SyncRequest { worker_id: id.into(), run_id, active_users: 0, delta, capacity: None }).unwrap()
         };
         assert_eq!(sync(&mut c, &a, 0, 0).run_id, 0);
 
@@ -526,8 +530,29 @@ mod tests {
         sync(&mut c, &b, run - 1, 99); // stale run, ignored for run stats
         assert_eq!(c.run.as_ref().unwrap().stats.requests, 10);
 
-        assert!(c.sync(SyncRequest { worker_id: "nope".into(), run_id: 0, active_users: 0, delta: Stats::default() }).is_none());
+        assert!(c.sync(SyncRequest { worker_id: "nope".into(), run_id: 0, active_users: 0, delta: Stats::default(), capacity: None }).is_none());
         c.stop();
         assert_eq!(sync(&mut c, &a, run, 0).users, 0);
+    }
+
+    #[test]
+    fn full_capacity_mode_follows_live_capacity() {
+        let mut c = Coordinator::new("t".into(), "http://x/".into(), vec!["/".into()]);
+        let phone = c
+            .register(RegisterRequest { name: "phone".into(), kind: WorkerKind::Browser, capacity: 12, platform: String::new() })
+            .worker_id;
+        let laptop = c
+            .register(RegisterRequest { name: "laptop".into(), kind: WorkerKind::Native, capacity: 500, platform: String::new() })
+            .worker_id;
+        c.start(StartRun { users: 0, spawn_rate: 100.0, duration_secs: 0, wait_min_ms: 0, wait_max_ms: 0, timeout_ms: 1000 });
+        let mut sync = |id: &str, capacity| {
+            c.sync(SyncRequest { worker_id: id.into(), run_id: 1, active_users: 0, delta: Stats::default(), capacity }).unwrap()
+        };
+        assert_eq!(sync(&phone, None).users, 12);
+        assert_eq!(sync(&laptop, None).users, 500);
+        // The phone's auto-tune raises its capacity; it gets all of it.
+        let a = sync(&phone, Some(400));
+        assert_eq!(a.users, 400);
+        assert!(a.spawn_per_sec >= 20.0, "spawn={}", a.spawn_per_sec);
     }
 }
