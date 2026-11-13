@@ -1,6 +1,4 @@
+target/
 .vscode/
-coverage/
 loc.py
-node_modules/
-coverage/
 .env

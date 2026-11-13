@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strezz Worker</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --ok:#059669; --bad:#dc2626; --warn:#d97706; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b0f17; --card:#131a26; --fg:#e5e7eb; --muted:#9ca3af; --line:#243041; --accent:#60a5fa; --ok:#34d399; --bad:#f87171; --warn:#fbbf24; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:520px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 8px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .stat b { display:block; font-size:26px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:13px; }
+  label { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:10px; }
+  input[type=number] { width:100px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); font-size:16px; }
+  input[type=checkbox] { width:22px; height:22px; }
+  button { width:100%; padding:14px; margin-top:14px; border:0; border-radius:12px; font-size:17px; font-weight:600; background:var(--accent); color:#fff; }
+  button.stop { background:var(--bad); }
+  .pill { display:inline-block; padding:2px 10px; border-radius:99px; font-size:13px; border:1px solid var(--line); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { font-size:13px; padding:3px 9px; border-radius:8px; background:var(--bg); border:1px solid var(--line); }
+  #tune { margin-top:10px; font-size:14px; }
+  #tune.up { color:var(--ok); } #tune.down { color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Strezz worker</h1>
+  <div class="muted">This browser becomes part of the load-testing fleet. Keep this tab open and the screen on.</div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span id="state" class="pill">not joined</span>
+      <span class="muted" id="target"></span>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div class="stat"><b id="users">0</b><span>active users</span></div>
+      <div class="stat"><b id="rps">0</b><span>requests / s</span></div>
+      <div class="stat"><b id="sent">0</b><span>requests sent</span></div>
+      <div class="stat"><b id="fails">0</b><span>failures</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>This device</h2>
+    <div class="chips" id="device"></div>
+    <label>Max concurrent users
+      <input id="capacity" type="number" min="1" max="5000">
+    </label>
+    <label>Auto-tune to this device's limit
+      <input id="auto" type="checkbox" checked>
+    </label>
+    <div id="tune" class="muted"></div>
+    <button id="toggle">Join fleet</button>
+  </div>
+
+  <div class="card muted" style="font-size:13px">
+    The starting value comes from this device's CPU cores, memory and network. During a run, auto-tune
+    keeps adding users while throughput keeps rising. It backs off when the browser starts lagging, when
+    latency balloons (the browser is queueing connections), or when errors rise. Browsers can't read
+    cross-origin responses, so only network failures and timeouts are counted, not HTTP error codes.
+  </div>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const BUCKETS = 64, MAX_CAP = 5000, WINDOW_MS = 5000;
+const $ = (id) => document.getElementById(id);
+const bucketFor = (ms) => Math.min(BUCKETS - 1, Math.floor(Math.log2(Math.max(0, ms) + 1) * 4));
+const newDelta = () => ({ requests: 0, failures: 0, bytes: 0, latency_sum_ms: 0, hist: new Array(BUCKETS).fill(0), errors: {} });
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ---- device profile -> recommended starting capacity
+function deviceProfile() {
+  const cores = navigator.hardwareConcurrency || 4;
+  const memGB = navigator.deviceMemory || null;          // Chromium only (capped at 8)
+  const conn = navigator.connection || {};
+  const net = conn.effectiveType || null;                 // 4g / 3g / 2g / slow-2g
+  // Virtual users mostly sleep (think time), so ~8 per core is a safe start;
+  // auto-tune finds the real ceiling from live measurements.
+  let rec = cores * 8;
+  if (memGB) rec *= memGB <= 1 ? 0.25 : memGB <= 2 ? 0.5 : memGB <= 4 ? 0.75 : 1;
+  if (net === "3g") rec = Math.min(rec, 12);
+  else if (net && net.includes("2g")) rec = Math.min(rec, 4);
+  if (conn.saveData) rec *= 0.5;
+  return { cores, memGB, net, downlink: conn.downlink || null, rec: clamp(Math.round(rec), 6, 256) };
+}
+const device = deviceProfile();
+$("device").innerHTML = [
+  device.cores + " CPU cores",
+  device.memGB ? "≥ " + device.memGB + " GB RAM" : "RAM: not reported",
+  device.net ? "network " + device.net + (device.downlink ? " · " + device.downlink + " Mbps" : "") : "network: not reported",
+  "recommended start: " + device.rec + " users",
+].map((t) => `<span class="chip">${t}</span>`).join("");
+let capacity = device.rec;
+$("capacity").value = capacity;
+
+// ---- state
+let joined = false, workerId = null, plan = { run_id: 0, users: 0 }, users = [], delta = newDelta();
+let spawnBudget = 0, lastTick = performance.now(), totals = { sent: 0, fails: 0 }, wakeLock = null, timer = null;
+
+// ---- auto-tune measurements
+let win = newWindow(), baseline = null, prevRps = null, holds = 0, fullSince = null;
+function newWindow() { return { start: performance.now(), requests: 0, failures: 0, lat: [], lagSum: 0, lagN: 0 }; }
+// Event-loop lag: when the phone's CPU is saturated, timers fire late.
+let lagExpected = performance.now() + 200;
+setInterval(() => {
+  const now = performance.now();
+  win.lagSum += Math.max(0, now - lagExpected); win.lagN++;
+  lagExpected = now + 200;
+}, 200);
+
+function setTune(text, cls = "") { $("tune").textContent = text; $("tune").className = cls || "muted"; }
+
+function setCapacity(n, why, cls) {
+  capacity = clamp(Math.round(n), 1, MAX_CAP);
+  $("capacity").value = capacity;
+  if (why) setTune(why, cls);
+}
+
+function autoTune() {
+  const now = performance.now();
+  if (now - win.start < WINDOW_MS) return;
+  const w = win; win = newWindow();
+  if (!$("auto").checked || !plan.run_id) { baseline = prevRps = null; holds = 0; return; }
+
+  // Only judge the device once it is fully ramped to everything it was given.
+  const saturated = plan.users >= capacity && users.length >= capacity;
+  if (!saturated) { fullSince = null; setTune(plan.users < capacity ? `Using ${plan.users} of ${capacity}: the run asks for less than this device can do` : "Ramping up…"); return; }
+  if (fullSince === null) { fullSince = now; return; }       // skip the window that included ramp-up
+  if (w.requests < 5) return;
+
+  const secs = (now - w.start) / 1000;
+  const rps = w.requests / secs;
+  const errRate = w.failures / w.requests;
+  const lag = w.lagN ? w.lagSum / w.lagN : 0;
+  w.lat.sort((a, b) => a - b);
+  const median = w.lat[Math.floor(w.lat.length / 2)];
+  baseline = baseline === null ? median : Math.min(baseline, median);
+  const fmt = (v) => Math.round(v);
+
+  let reason = null;
+  if (lag > 80) reason = `browser lagging ${fmt(lag)} ms (CPU busy)`;
+  else if (errRate > 0.05) reason = `${fmt(errRate * 100)}% failures`;
+  else if (median > baseline * 2.5 && median - baseline > 150) reason = `latency ${fmt(median)} ms vs ${fmt(baseline)} ms (connections queueing)`;
+
+  if (reason) {
+    setCapacity(capacity * 0.8, `↓ ${capacity} → ${clamp(Math.round(capacity * 0.8), 1, MAX_CAP)}: ${reason}`, "down");
+    holds = 0; fullSince = null; prevRps = null;
+  } else if (prevRps === null || rps > prevRps * 1.05 || holds >= 4) {
+    const next = Math.max(capacity + 2, capacity * (holds >= 4 ? 1.1 : 1.25));
+    setCapacity(next, `↑ ${capacity} → ${clamp(Math.round(next), 1, MAX_CAP)}: ${fmt(rps)} req/s, ${fmt(median)} ms, ${fmt(lag)} ms lag`, "up");
+    holds = 0; fullSince = null; prevRps = rps;
+  } else {
+    holds++;
+    setTune(`Holding at ${capacity} users: throughput has plateaued at ${fmt(rps)} req/s (this is the device's limit)`);
+    prevRps = Math.max(prevRps, rps);
+  }
+}
+
+$("capacity").onchange = () => { $("auto").checked = false; setCapacity(+$("capacity").value || 1, "Manual capacity"); };
+$("auto").onchange = () => { baseline = prevRps = fullSince = null; holds = 0; setTune($("auto").checked ? "Auto-tune on" : "Auto-tune off"); };
+
+// ---- load generation
+function record(ms, error) {
+  delta.requests++; delta.latency_sum_ms += ms; delta.hist[bucketFor(ms)]++;
+  win.requests++; win.lat.push(ms);
+  totals.sent++;
+  if (error) { delta.failures++; win.failures++; totals.fails++; delta.errors[error] = (delta.errors[error] || 0) + 1; }
+}
+
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-strezz-token": token }, body: JSON.stringify(body) });
+  if (!r.ok) { const e = new Error(r.status + " " + await r.text()); e.status = r.status; throw e; }
+  return r.json();
+}
+
+const sleep = (ms, signal) => new Promise((res) => {
+  const t = setTimeout(res, ms);
+  signal.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
+});
+
+async function virtualUser(p, signal) {
+  const urls = p.paths.map((x) => new URL(x, p.target).href);
+  await sleep(Math.random() * Math.min(1000, p.wait_max_ms), signal);
+  while (!signal.aborted) {
+    const url = urls[Math.floor(Math.random() * urls.length)];
+    const rc = new AbortController();
+    const onStop = () => rc.abort();
+    signal.addEventListener("abort", onStop, { once: true });
+    const to = setTimeout(() => rc.abort("timeout"), p.timeout_ms);
+    const t0 = performance.now();
+    try {
+      // no-cors: we can't read cross-origin responses, but the request is real load.
+      await fetch(url, { mode: "no-cors", cache: "no-store", credentials: "omit", signal: rc.signal });
+      record(performance.now() - t0, null);
+    } catch (e) {
+      if (signal.aborted) break;
+      record(performance.now() - t0, rc.signal.reason === "timeout" ? "timeout" : "network error (browser)");
+    } finally { clearTimeout(to); signal.removeEventListener("abort", onStop); }
+    const wait = p.wait_min_ms + Math.random() * Math.max(0, p.wait_max_ms - p.wait_min_ms);
+    await sleep(wait, signal);
+  }
+}
+
+function stopUsers(n = 0) { while (users.length > n) users.pop().abort(); }
+
+async function tick() {
+  if (!joined) return;
+  try {
+    if (!workerId) {
+      const name = (navigator.userAgentData?.platform || navigator.platform || "device") + " browser · " + device.cores + " cores";
+      const r = await api("/api/register", { name, kind: "browser", capacity, platform: navigator.userAgent });
+      workerId = r.worker_id;
+    }
+    autoTune();
+    const sent = delta; delta = newDelta();
+    const next = await api("/api/sync", { worker_id: workerId, run_id: plan.run_id, active_users: users.length, delta: sent, capacity });
+    if (next.run_id !== plan.run_id) { stopUsers(); spawnBudget = 0; baseline = prevRps = fullSince = null; holds = 0; win = newWindow(); }
+    const now = performance.now(), dt = (now - lastTick) / 1000; lastTick = now;
+    const want = Math.min(next.users, capacity);
+    if (users.length > want) stopUsers(want);
+    else if (next.run_id && users.length < want) {
+      spawnBudget = Math.min(want, spawnBudget + Math.max(next.spawn_per_sec, 2) * dt);
+      const add = Math.min(Math.floor(spawnBudget), want - users.length);
+      spawnBudget -= add;
+      for (let i = 0; i < add; i++) { const c = new AbortController(); users.push(c); virtualUser(next, c.signal); }
+    }
+    $("rps").textContent = Math.round(sent.requests / Math.max(dt, 0.001));
+    plan = next;
+    $("state").textContent = next.run_id ? "running · run " + next.run_id : "joined · waiting for a run";
+    $("state").className = "pill on";
+    $("target").textContent = next.target ? new URL(next.target).host : "";
+  } catch (e) {
+    if (e.status === 404) workerId = null;
+    $("state").textContent = e.status === 401 ? "bad token" : "reconnecting…";
+    $("state").className = "pill";
+  }
+  $("users").textContent = users.length;
+  $("sent").textContent = totals.sent.toLocaleString();
+  $("fails").textContent = totals.fails.toLocaleString();
+  timer = setTimeout(tick, 1000);
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => { if (joined && document.visibilityState === "visible") keepAwake(); });
+
+$("toggle").onclick = () => {
+  joined = !joined;
+  if (joined) {
+    $("toggle").textContent = "Leave fleet"; $("toggle").className = "stop";
+    keepAwake(); lastTick = performance.now(); win = newWindow(); tick();
+  } else {
+    clearTimeout(timer); stopUsers(); workerId = null; plan = { run_id: 0, users: 0 };
+    wakeLock?.release(); $("toggle").textContent = "Join fleet"; $("toggle").className = "";
+    $("state").textContent = "not joined"; $("state").className = "pill"; setTune("");
+  }
+};
+if (!token) { $("state").textContent = "missing token in URL"; $("toggle").disabled = true; }
+</script>
+</body>
+</html>
