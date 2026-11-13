@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strezz Worker</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --ok:#059669; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b0f17; --card:#131a26; --fg:#e5e7eb; --muted:#9ca3af; --line:#243041; --accent:#60a5fa; --ok:#34d399; --bad:#f87171; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:520px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .stat b { display:block; font-size:26px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:13px; }
+  label { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  input { width:90px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); font-size:16px; }
+  button { width:100%; padding:14px; margin-top:14px; border:0; border-radius:12px; font-size:17px; font-weight:600; background:var(--accent); color:#fff; }
+  button.stop { background:var(--bad); }
+  .pill { display:inline-block; padding:2px 10px; border-radius:99px; font-size:13px; border:1px solid var(--line); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Strezz worker</h1>
+  <div class="muted">This browser becomes part of the load-testing fleet. Keep this tab open and the screen on.</div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span id="state" class="pill">not joined</span>
+      <span class="muted" id="target"></span>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div class="stat"><b id="users">0</b><span>active users</span></div>
+      <div class="stat"><b id="rps">0</b><span>requests / s</span></div>
+      <div class="stat"><b id="sent">0</b><span>requests sent</span></div>
+      <div class="stat"><b id="fails">0</b><span>failures</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Max concurrent users
+      <input id="capacity" type="number" min="1" max="2000" value="6">
+    </label>
+    <div class="muted" style="margin-top:8px">Browsers open about 6 connections per site over HTTP/1.1. If the target uses HTTP/2 or HTTP/3, you can raise this. Responses are opaque to the browser, so only network failures and timeouts are counted (not HTTP error codes).</div>
+    <button id="toggle">Join fleet</button>
+  </div>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const BUCKETS = 64;
+const $ = (id) => document.getElementById(id);
+const bucketFor = (ms) => Math.min(BUCKETS - 1, Math.floor(Math.log2(Math.max(0, ms) + 1) * 4));
+const newDelta = () => ({ requests: 0, failures: 0, bytes: 0, latency_sum_ms: 0, hist: new Array(BUCKETS).fill(0), errors: {} });
+
+let joined = false, workerId = null, plan = { run_id: 0, users: 0 }, users = [], delta = newDelta();
+let spawnBudget = 0, lastTick = performance.now(), totals = { sent: 0, fails: 0 }, wakeLock = null, timer = null;
+
+function record(ms, error) {
+  delta.requests++; delta.latency_sum_ms += ms; delta.hist[bucketFor(ms)]++;
+  totals.sent++;
+  if (error) { delta.failures++; totals.fails++; delta.errors[error] = (delta.errors[error] || 0) + 1; }
+}
+
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-strezz-token": token }, body: JSON.stringify(body) });
+  if (!r.ok) { const e = new Error(r.status + " " + await r.text()); e.status = r.status; throw e; }
+  return r.json();
+}
+
+const sleep = (ms, signal) => new Promise((res) => {
+  const t = setTimeout(res, ms);
+  signal.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
+});
+
+async function virtualUser(p, signal) {
+  const urls = p.paths.map((x) => new URL(x, p.target).href);
+  await sleep(Math.random() * Math.min(1000, p.wait_max_ms), signal);
+  while (!signal.aborted) {
+    const url = urls[Math.floor(Math.random() * urls.length)];
+    const rc = new AbortController();
+    const onStop = () => rc.abort();
+    signal.addEventListener("abort", onStop, { once: true });
+    const to = setTimeout(() => rc.abort("timeout"), p.timeout_ms);
+    const t0 = performance.now();
+    try {
+      // no-cors: we can't read cross-origin responses, but the request is real load.
+      await fetch(url, { mode: "no-cors", cache: "no-store", credentials: "omit", signal: rc.signal });
+      record(performance.now() - t0, null);
+    } catch (e) {
+      if (signal.aborted) break;
+      record(performance.now() - t0, rc.signal.reason === "timeout" ? "timeout" : "network error (browser)");
+    } finally { clearTimeout(to); signal.removeEventListener("abort", onStop); }
+    const wait = p.wait_min_ms + Math.random() * Math.max(0, p.wait_max_ms - p.wait_min_ms);
+    await sleep(wait, signal);
+  }
+}
+
+function stopUsers(n = 0) { while (users.length > n) users.pop().abort(); }
+
+async function tick() {
+  if (!joined) return;
+  try {
+    if (!workerId) {
+      const name = (navigator.userAgentData?.platform || navigator.platform || "device") + " browser";
+      const r = await api("/api/register", { name, kind: "browser", capacity: Math.max(1, +$("capacity").value || 6), platform: navigator.userAgent });
+      workerId = r.worker_id;
+    }
+    const sent = delta; delta = newDelta();
+    const next = await api("/api/sync", { worker_id: workerId, run_id: plan.run_id, active_users: users.length, delta: sent });
+    if (next.run_id !== plan.run_id) { stopUsers(); spawnBudget = 0; }
+    const now = performance.now(), dt = (now - lastTick) / 1000; lastTick = now;
+    if (users.length > next.users) stopUsers(next.users);
+    else if (next.run_id && users.length < next.users) {
+      spawnBudget = Math.min(next.users, spawnBudget + next.spawn_per_sec * dt);
+      const add = Math.min(Math.floor(spawnBudget), next.users - users.length);
+      spawnBudget -= add;
+      for (let i = 0; i < add; i++) { const c = new AbortController(); users.push(c); virtualUser(next, c.signal); }
+    }
+    $("rps").textContent = Math.round(sent.requests / Math.max(dt, 0.001));
+    plan = next;
+    $("state").textContent = next.run_id ? "running · run " + next.run_id : "joined · waiting";
+    $("state").className = "pill on";
+    $("target").textContent = next.target ? new URL(next.target).host : "";
+  } catch (e) {
+    if (e.status === 404) workerId = null;
+    $("state").textContent = e.status === 401 ? "bad token" : "reconnecting…";
+    $("state").className = "pill";
+  }
+  $("users").textContent = users.length;
+  $("sent").textContent = totals.sent.toLocaleString();
+  $("fails").textContent = totals.fails.toLocaleString();
+  timer = setTimeout(tick, 1000);
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => { if (joined && document.visibilityState === "visible") keepAwake(); });
+
+$("toggle").onclick = () => {
+  joined = !joined;
+  if (joined) {
+    $("toggle").textContent = "Leave fleet"; $("toggle").className = "stop";
+    $("capacity").disabled = true; keepAwake(); lastTick = performance.now(); tick();
+  } else {
+    clearTimeout(timer); stopUsers(); workerId = null; plan = { run_id: 0, users: 0 };
+    wakeLock?.release(); $("toggle").textContent = "Join fleet"; $("toggle").className = "";
+    $("capacity").disabled = false; $("state").textContent = "not joined"; $("state").className = "pill";
+  }
+};
+if (!token) { $("state").textContent = "missing token in URL"; $("toggle").disabled = true; }
+</script>
+</body>
+</html>

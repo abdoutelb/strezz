@@ -1,15 +1,11 @@
 version: 2
 updates:
-- package-ecosystem: npm
+- package-ecosystem: cargo
   directory: "/"
   schedule:
     interval: daily
     time: "03:00"
   open-pull-requests-limit: 10
-  ignore:
-  - dependency-name: eslint
-    versions:
-    - 7.23.0
 - package-ecosystem: docker
   directory: "/"
   schedule:

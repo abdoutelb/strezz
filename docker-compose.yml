@@ -1,12 +1,11 @@
-version: "3"
 services:
-    strezz:
-      env_file:
-      - .env  
-      build:
-        args:
-            url: "${url}"
-        context: .
-      ports:
-        - 4000:4000
-     
+  strezz:
+    build: .
+    env_file:
+      - .env          # url=https://your-site.example/  (optional: STREZZ_TOKEN=...)
+    ports:
+      - 4000:4000
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strezz Fleet</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --p95:#d97706; --ok:#059669; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b0f17; --card:#131a26; --fg:#e5e7eb; --muted:#9ca3af; --line:#243041; --accent:#60a5fa; --p95:#fbbf24; --ok:#34d399; --bad:#f87171; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:1180px; margin:0 auto; padding:20px 16px 48px; }
+  header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:8px; }
+  h1 { font-size:22px; margin:0; } h2 { font-size:15px; margin:0 0 10px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:16px 0; }
+  .tile b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .tile span { color:var(--muted); font-size:12px; }
+  .cols { display:grid; grid-template-columns:2fr 1fr; gap:14px; }
+  @media (max-width:860px) { .cols { grid-template-columns:1fr; } }
+  form { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  form label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:4px; }
+  input { padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); font-size:15px; width:100%; }
+  .btns { grid-column:1/-1; display:flex; gap:8px; }
+  button { flex:1; padding:11px; border:0; border-radius:10px; font-size:15px; font-weight:600; background:var(--accent); color:#fff; cursor:pointer; }
+  button.stop { background:var(--bad); }
+  canvas { width:100%; height:240px; display:block; }
+  .legend { display:flex; gap:14px; font-size:12px; color:var(--muted); margin-top:6px; }
+  .legend i { display:inline-block; width:10px; height:3px; vertical-align:middle; margin-right:5px; }
+  .tablewrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--ok); }
+  .dot.off { background:var(--muted); }
+  .bar { height:6px; background:var(--line); border-radius:3px; min-width:60px; }
+  .bar > div { height:100%; background:var(--accent); border-radius:3px; }
+  code { font-size:12px; word-break:break-all; background:var(--bg); padding:6px 8px; border-radius:6px; display:block; }
+  .qr { background:#fff; border-radius:10px; padding:6px; width:180px; height:180px; display:block; margin:6px auto; }
+  .warn { color:var(--bad); font-size:13px; margin-top:8px; }
+  .stack > * + * { margin-top:14px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Strezz fleet</h1>
+    <span class="muted" id="target">…</span>
+  </header>
+
+  <div class="tiles">
+    <div class="card tile"><b id="t-workers">0</b><span>devices · <span id="t-cap">0</span> user capacity</span></div>
+    <div class="card tile"><b id="t-users">0</b><span>active users</span></div>
+    <div class="card tile"><b id="t-rps">0</b><span>requests / s</span></div>
+    <div class="card tile"><b id="t-fail">0%</b><span>failure rate</span></div>
+    <div class="card tile"><b id="t-p50">–</b><span>p50 latency</span></div>
+    <div class="card tile"><b id="t-p95">–</b><span>p95 latency</span></div>
+    <div class="card tile"><b id="t-p99">–</b><span>p99 latency</span></div>
+    <div class="card tile"><b id="t-total">0</b><span>requests · <span id="t-elapsed">0s</span></span></div>
+  </div>
+
+  <div class="cols">
+    <div class="stack">
+      <div class="card">
+        <h2>Throughput &amp; latency</h2>
+        <canvas id="chart"></canvas>
+        <div class="legend"><span><i style="background:var(--accent)"></i>requests/s</span><span><i style="background:var(--p95)"></i>p95 ms</span><span><i style="background:var(--bad)"></i>failures/s</span></div>
+      </div>
+      <div class="card">
+        <h2>Devices</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Device</th><th>Type</th><th class="n">Capacity</th><th>Load</th><th class="n">Users</th><th class="n">req/s</th><th class="n">Requests</th><th class="n">Failures</th></tr></thead>
+          <tbody id="workers"><tr><td colspan="8" class="muted">No devices yet</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <h2>Top errors</h2>
+        <div id="errors" class="muted">None</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="card">
+        <h2>Run</h2>
+        <form id="form">
+          <label>Total users<input name="users" type="number" min="1" value="200"></label>
+          <label>Spawn rate /s<input name="spawn_rate" type="number" min="1" value="50"></label>
+          <label>Duration (s, 0 = ∞)<input name="duration_secs" type="number" min="0" value="60"></label>
+          <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
+          <label>Wait min (ms)<input name="wait_min_ms" type="number" min="0" value="1000"></label>
+          <label>Wait max (ms)<input name="wait_max_ms" type="number" min="0" value="3000"></label>
+          <div class="btns"><button type="submit">Start</button><button type="button" class="stop" id="stop">Stop</button></div>
+        </form>
+        <div id="capwarn" class="warn" hidden></div>
+        <div class="muted" id="runstate" style="margin-top:8px">Idle</div>
+      </div>
+      <div class="card">
+        <h2>Add devices</h2>
+        <div class="muted">Phones, tablets, any browser: scan or open</div>
+        <img class="qr" id="qr" alt="Join QR code">
+        <code id="joinurl"></code>
+        <div class="muted" style="margin-top:12px">Laptops, servers, Termux on Android:</div>
+        <code id="cmd"></code>
+      </div>
+      <div class="card">
+        <h2>Paths <span class="muted" id="pathcount"></span></h2>
+        <div class="muted" id="paths" style="max-height:160px;overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const $ = (id) => document.getElementById(id);
+const H = { "content-type": "application/json", "x-strezz-token": token };
+const fmt = (n) => Math.round(n).toLocaleString();
+const ms = (v) => v ? (v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(2) + " s") : "–";
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+let last = null, joinShown = "";
+
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, Number(v)]));
+  const r = await fetch("/api/run/start", { method: "POST", headers: H, body: JSON.stringify(body) });
+  if (!r.ok) alert(await r.text());
+  refresh();
+};
+$("stop").onclick = async () => { await fetch("/api/run/stop", { method: "POST", headers: H }); refresh(); };
+
+function drawChart(timeline) {
+  const c = $("chart"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement), col = (v) => css.getPropertyValue(v).trim();
+  const pts = timeline.slice(-180);
+  g.strokeStyle = col("--line"); g.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { g.beginPath(); g.moveTo(0, h * i / 4); g.lineTo(w, h * i / 4); g.stroke(); }
+  if (pts.length < 2) { g.fillStyle = col("--muted"); g.font = "13px system-ui"; g.fillText("Start a run to see live data", 12, 24); return; }
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || 1;
+  const x = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 50);
+  const series = (key, color, max) => {
+    g.strokeStyle = color; g.lineWidth = 2; g.beginPath();
+    pts.forEach((p, i) => { const y = h - 8 - (p[key] / (max || 1)) * (h - 24); i ? g.lineTo(x(p.t), y) : g.moveTo(x(p.t), y); });
+    g.stroke();
+  };
+  const maxR = Math.max(...pts.map((p) => p.requests), 1), maxP = Math.max(...pts.map((p) => p.p95_ms), 1);
+  series("requests", col("--accent"), maxR); series("failures", col("--bad"), maxR); series("p95_ms", col("--p95"), maxP);
+  g.font = "11px system-ui"; g.fillStyle = col("--accent"); g.fillText(fmt(maxR) + "/s", w - 46, 14);
+  g.fillStyle = col("--p95"); g.fillText(ms(maxP), w - 46, 28);
+}
+
+async function refresh() {
+  let s;
+  try {
+    const r = await fetch("/api/status", { headers: H });
+    if (r.status === 401) { $("target").textContent = "Wrong or missing ?token= in the URL"; return; }
+    s = await r.json();
+  } catch (_) { $("target").textContent = "coordinator unreachable"; return; }
+  last = s;
+  $("target").textContent = "Target: " + s.target;
+  const alive = s.workers.filter((w) => w.alive);
+  $("t-workers").textContent = alive.length; $("t-cap").textContent = fmt(s.fleet_capacity);
+
+  const base = s.public_base || location.origin;
+  const join = base + "/join?token=" + encodeURIComponent(token);
+  if (join !== joinShown) {
+    joinShown = join;
+    $("qr").src = "/api/qr.svg?data=" + encodeURIComponent(join);
+    $("joinurl").textContent = join;
+    $("cmd").textContent = "strezz worker --coordinator " + base + " --token " + token;
+  }
+  $("pathcount").textContent = "(" + s.paths.length + ")";
+  $("paths").innerHTML = s.paths.map(esc).join("<br>");
+
+  const run = s.run;
+  if (run) {
+    $("t-users").textContent = fmt(run.active_users);
+    $("t-rps").textContent = fmt(run.rps);
+    $("t-fail").textContent = run.requests ? (100 * run.failures / run.requests).toFixed(1) + "%" : "0%";
+    $("t-p50").textContent = ms(run.p50_ms); $("t-p95").textContent = ms(run.p95_ms); $("t-p99").textContent = ms(run.p99_ms);
+    $("t-total").textContent = fmt(run.requests); $("t-elapsed").textContent = run.elapsed_secs + "s";
+    $("runstate").textContent = (run.active ? "Running" : "Finished") + " · run " + run.id + " · " + run.config.users + " users";
+    $("errors").innerHTML = run.errors.length ? run.errors.map(([k, v]) => esc(k) + ": <b>" + fmt(v) + "</b>").join("<br>") : "None";
+    drawChart(run.timeline);
+    const want = run.config.users;
+    $("capwarn").hidden = !(run.active && want > s.fleet_capacity);
+    $("capwarn").textContent = "The fleet can hold " + fmt(s.fleet_capacity) + " of " + fmt(want) + " users. Add more devices to reach the full load.";
+  } else drawChart([]);
+
+  $("workers").innerHTML = s.workers.length ? s.workers.map((w) => {
+    const pct = w.capacity ? Math.min(100, 100 * w.active_users / w.capacity) : 0;
+    return `<tr><td><span class="dot ${w.alive ? "" : "off"}"></span>${esc(w.name)}</td><td>${w.kind}</td>
+      <td class="n">${fmt(w.capacity)}</td><td><div class="bar"><div style="width:${pct}%"></div></div></td>
+      <td class="n">${fmt(w.active_users)} / ${fmt(w.assigned)}</td><td class="n">${fmt(w.rps)}</td>
+      <td class="n">${fmt(w.requests)}</td><td class="n">${fmt(w.failures)}</td></tr>`;
+  }).join("") : '<tr><td colspan="8" class="muted">No devices yet</td></tr>';
+}
+addEventListener("resize", () => last?.run && drawChart(last.run.timeline));
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
