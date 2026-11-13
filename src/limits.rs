@@ -57,7 +57,7 @@ pub fn raise_fd_limit() -> u64 {
 
 /// Concurrent virtual users (one connection each) a worker can safely hold.
 pub fn capacity_from_fd_limit(soft_limit: u64) -> u32 {
-    soft_limit.saturating_sub(RESERVED_FDS).max(1).min(u32::MAX as u64) as u32
+    soft_limit.saturating_sub(RESERVED_FDS).clamp(1, u32::MAX as u64) as u32
 }
 
 #[cfg(test)]
@@ -74,6 +74,7 @@ mod tests {
     fn raising_never_lowers() {
         let raised = raise_fd_limit();
         assert!(raised >= 256, "raised={raised}");
+        #[cfg(unix)]
         assert!(raised <= os_max_files() as u64, "raised={raised} beyond kernel max");
     }
 }

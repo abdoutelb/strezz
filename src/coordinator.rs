@@ -68,6 +68,7 @@ impl Run {
     }
 }
 
+#[derive(Default)]
 pub struct Coordinator {
     pub token: String,
     pub target: String,
@@ -85,7 +86,7 @@ pub type Shared = Arc<Mutex<Coordinator>>;
 
 impl Coordinator {
     pub fn new(token: String, target: String, paths: Vec<String>) -> Self {
-        Self { token, target, paths, public_base: String::new(), lan_urls: Vec::new(), workers: HashMap::new(), run: None, next_run_id: 1 }
+        Self { token, target, paths, next_run_id: 1, ..Default::default() }
     }
 
     fn alive(&self) -> impl Iterator<Item = &Worker> {
@@ -499,7 +500,7 @@ mod tests {
             name: name.into(),
             kind: WorkerKind::Native,
             capacity: cap,
-            platform: String::new(),
+            platform: "test".into(),
         };
         let a = c.register(r("laptop", 300)).worker_id;
         let b = c.register(r("phone", 100)).worker_id;
@@ -539,10 +540,10 @@ mod tests {
     fn full_capacity_mode_follows_live_capacity() {
         let mut c = Coordinator::new("t".into(), "http://x/".into(), vec!["/".into()]);
         let phone = c
-            .register(RegisterRequest { name: "phone".into(), kind: WorkerKind::Browser, capacity: 12, platform: String::new() })
+            .register(RegisterRequest { name: "phone".into(), kind: WorkerKind::Browser, capacity: 12, platform: "test".into() })
             .worker_id;
         let laptop = c
-            .register(RegisterRequest { name: "laptop".into(), kind: WorkerKind::Native, capacity: 500, platform: String::new() })
+            .register(RegisterRequest { name: "laptop".into(), kind: WorkerKind::Native, capacity: 500, platform: "test".into() })
             .worker_id;
         c.start(StartRun { users: 0, spawn_rate: 100.0, duration_secs: 0, wait_min_ms: 0, wait_max_ms: 0, timeout_ms: 1000 });
         let mut sync = |id: &str, capacity| {
