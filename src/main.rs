@@ -126,8 +126,8 @@ async fn main() -> Result<()> {
             let join = format!("{base}/join?token={token}");
             {
                 let mut c = state.lock().unwrap();
-                c.public_base = base.clone();
-                c.lan_urls = detected.clone();
+                c.public_base.clone_from(&base);
+                c.lan_urls.clone_from(&detected);
                 if !c.lan_urls.contains(&base) {
                     c.lan_urls.insert(0, base.clone());
                 }
