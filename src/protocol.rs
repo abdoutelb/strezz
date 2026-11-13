@@ -53,7 +53,7 @@ pub struct SyncRequest {
     pub capacity: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Assignment {
     /// 0 when the fleet is idle.
     pub run_id: u64,
@@ -72,17 +72,9 @@ pub struct Assignment {
 }
 
 impl Assignment {
+    /// No run: zero users, nothing to hit.
     pub fn idle() -> Self {
-        Self {
-            run_id: 0,
-            target: String::new(),
-            paths: Vec::new(),
-            users: 0,
-            spawn_per_sec: 0.0,
-            wait_min_ms: 0,
-            wait_max_ms: 0,
-            timeout_ms: 0,
-        }
+        Self::default()
     }
 }
 

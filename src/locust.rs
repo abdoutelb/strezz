@@ -2,7 +2,7 @@
 //! locustfile for anyone who still wants to drive the test with Locust.
 
 pub fn generate_locustfile(paths: &[String]) -> String {
-    let mut tasks = String::new();
+    let mut tasks = String::with_capacity(paths.len() * 80);
     // The JS version started at index 1 and silently skipped the first link.
     for (i, path) in paths.iter().enumerate() {
         let path = path.replace('\\', "\\\\").replace('"', "\\\"");
