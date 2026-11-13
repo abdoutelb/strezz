@@ -1567,7 +1567,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "qrcode",
- "rand 0.8.8",
+ "rand 0.10.3",
  "reqwest",
  "scraper",
  "serde",
