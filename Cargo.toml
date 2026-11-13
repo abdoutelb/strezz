@@ -4,7 +4,6 @@ version = "0.2.0"
 edition = "2021"
 authors = ["abdoutelb"]
 description = "Distributed website stress testing: turn every device on your network into a load generator"
-license = "MIT"
 
 [dependencies]
 anyhow = "1"
