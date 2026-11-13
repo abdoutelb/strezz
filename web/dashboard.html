@@ -7,7 +7,7 @@
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --p95:#d97706; --ok:#059669; --bad:#dc2626; }
   @media (prefers-color-scheme: dark) { :root { --bg:#0b0f17; --card:#131a26; --fg:#e5e7eb; --muted:#9ca3af; --line:#243041; --accent:#60a5fa; --p95:#fbbf24; --ok:#34d399; --bad:#f87171; } }
-  * { box-sizing:border-box; }
+  * { box-sizing:border-box; } [hidden] { display:none !important; }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
   main { max-width:1180px; margin:0 auto; padding:20px 16px 48px; }
   header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:8px; }
@@ -99,6 +99,8 @@
         <h2>Add devices</h2>
         <div class="muted">Phones, tablets, any browser: scan or open</div>
         <img class="qr" id="qr" alt="Join QR code">
+        <label class="muted" id="addrpick" hidden style="display:flex;gap:6px;align-items:center;margin:6px 0">Address
+          <select id="addr" style="flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"></select></label>
         <code id="joinurl"></code>
         <div class="muted" style="margin-top:12px">Laptops, servers, Termux on Android:</div>
         <code id="cmd"></code>
@@ -117,7 +119,11 @@ const H = { "content-type": "application/json", "x-strezz-token": token };
 const fmt = (n) => Math.round(n).toLocaleString();
 const ms = (v) => v ? (v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(2) + " s") : "–";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-let last = null, joinShown = "";
+let last = null, joinShown = "", chosenBase = null;
+const LOOPBACK = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"];
+// If this dashboard was opened via a LAN address, that address is proven reachable.
+const pageBase = LOOPBACK.includes(location.hostname) ? null : location.origin;
+$("addr").onchange = () => { chosenBase = $("addr").value; refresh(); };
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -162,7 +168,12 @@ async function refresh() {
   const alive = s.workers.filter((w) => w.alive);
   $("t-workers").textContent = alive.length; $("t-cap").textContent = fmt(s.fleet_capacity);
 
-  const base = s.public_base || location.origin;
+  const options = [...new Set([pageBase, ...(s.lan_urls || []), s.public_base].filter(Boolean))];
+  const base = chosenBase || pageBase || s.public_base || location.origin;
+  if ($("addr").options.length !== options.length) {
+    $("addr").innerHTML = options.map((o) => `<option${o === base ? " selected" : ""}>${esc(o)}</option>`).join("");
+  }
+  $("addrpick").hidden = options.length < 2;
   const join = base + "/join?token=" + encodeURIComponent(token);
   if (join !== joinShown) {
     joinShown = join;

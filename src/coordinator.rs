@@ -74,6 +74,8 @@ pub struct Coordinator {
     pub paths: Vec<String>,
     /// LAN URL of the coordinator, shown on the dashboard for joining devices.
     pub public_base: String,
+    /// Every LAN URL this machine is reachable on, best first.
+    pub lan_urls: Vec<String>,
     workers: HashMap<String, Worker>,
     run: Option<Run>,
     next_run_id: u64,
@@ -83,7 +85,7 @@ pub type Shared = Arc<Mutex<Coordinator>>;
 
 impl Coordinator {
     pub fn new(token: String, target: String, paths: Vec<String>) -> Self {
-        Self { token, target, paths, public_base: String::new(), workers: HashMap::new(), run: None, next_run_id: 1 }
+        Self { token, target, paths, public_base: String::new(), lan_urls: Vec::new(), workers: HashMap::new(), run: None, next_run_id: 1 }
     }
 
     fn alive(&self) -> impl Iterator<Item = &Worker> {
@@ -288,6 +290,7 @@ impl Coordinator {
         json!({
             "target": self.target, "paths": self.paths,
             "public_base": self.public_base,
+            "lan_urls": self.lan_urls,
             "fleet_capacity": self.fleet_capacity(),
             "workers": workers, "run": run,
         })

@@ -2,7 +2,11 @@ services:
   strezz:
     build: .
     env_file:
-      - .env          # url=https://your-site.example/  (optional: STREZZ_TOKEN=...)
+      - .env
+    # .env needs:
+    #   url=https://your-site.example/
+    #   STREZZ_PUBLIC_URL=http://<this computer's LAN IP>:4000   (what phones open)
+    # A container can't see the host's Wi-Fi address, so it must be given here.
     ports:
       - 4000:4000
     ulimits:

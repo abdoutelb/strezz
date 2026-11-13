@@ -62,6 +62,23 @@ The coordinator prints:
 The coordinator also runs a local worker. Pass `--no-local-worker` to keep it as a pure
 controller.
 
+### Phone can't connect?
+
+- The phone must be on the **same Wi-Fi** as the coordinator, not on mobile data or a guest
+  network that isolates clients.
+- The phone URL uses the machine's LAN address (for example `192.168.x.x`), never `localhost`.
+  Strezz skips loopback, Docker, VPN and link-local interfaces when it picks this address. If it
+  picks the wrong one, set it yourself:
+  `strezz coordinator --url … --public-url http://192.168.1.4:4000` (or `STREZZ_PUBLIC_URL=…`).
+- The dashboard has an **Address** picker if the machine has several LAN addresses. If you open
+  the dashboard through a LAN address instead of `localhost`, the QR code uses that address.
+- **Docker:** a container only sees its own internal IP, so put
+  `STREZZ_PUBLIC_URL=http://<your LAN IP>:4000` in `.env`.
+- **macOS:** click *Allow* when asked about incoming connections. Otherwise, check System
+  Settings → Network → Firewall.
+- **Devices outside your network** need a tunnel (for example `cloudflared tunnel --url
+  http://localhost:4000`). Pass the tunnel URL as `--public-url`.
+
 ### Other ways to join
 
 | Device | How |
@@ -82,6 +99,7 @@ target speaks HTTP/2 or HTTP/3, raise the capacity on the join page.
 
 ```sh
 echo "url=https://your-site.example/" > .env
+echo "STREZZ_PUBLIC_URL=http://<your LAN IP>:4000" >> .env   # e.g. from: ipconfig getifaddr en0
 docker compose up
 # dashboard: the URL printed in the logs (use your machine's LAN IP for phones)
 ```
@@ -119,6 +137,7 @@ cargo clippy --all-targets -- -D warnings
 | `src/coordinator.rs` | Fleet state, user allocation, stats aggregation, HTTP API |
 | `src/worker.rs` | Native load engine: one connection pool per virtual user, ramp-up, think time |
 | `src/limits.rs` | Open-file limit raising and capacity |
+| `src/netaddr.rs` | Picks the LAN address that phones should use |
 | `src/stats.rs` | Mergeable latency histogram (the same formula is in `web/join.html`) |
 | `src/crawl.rs` | Link discovery (port of `extracter.js`) |
 | `src/locust.rs` | Locust file generation (port of `helpers.js`) |

@@ -2,6 +2,7 @@ mod coordinator;
 mod crawl;
 mod limits;
 mod locust;
+mod netaddr;
 mod protocol;
 mod stats;
 mod worker;
@@ -40,6 +41,11 @@ enum Cmd {
         /// Extra paths to hit besides the crawled ones (repeatable).
         #[arg(long = "path")]
         extra_paths: Vec<String>,
+        /// URL phones and other machines use to reach this coordinator, e.g.
+        /// http://192.168.1.4:4000 (auto-detected from the LAN interface if omitted;
+        /// set it when running in Docker or behind a tunnel).
+        #[arg(long, env = "STREZZ_PUBLIC_URL")]
+        public_url: Option<Url>,
     },
     /// Join a coordinator and generate load.
     Worker {
@@ -71,7 +77,7 @@ fn hostname() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Coordinator { url, listen, token, no_local_worker, extra_paths } => {
+        Cmd::Coordinator { url, listen, token, no_local_worker, extra_paths, public_url } => {
             let mut paths = match crawl::discover_paths(&url).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -98,12 +104,34 @@ async fn main() -> Result<()> {
                 .await
                 .with_context(|| format!("binding {listen}"))?;
             let port = listener.local_addr()?.port();
-            let lan = local_ip_address::local_ip()
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|_| "127.0.0.1".into());
-            let base = format!("http://{lan}:{port}");
+            let detected: Vec<String> = netaddr::lan_addresses()
+                .iter()
+                .map(|ip| format!("http://{ip}:{port}"))
+                .collect();
+            let base = match &public_url {
+                Some(u) => u.as_str().trim_end_matches('/').to_string(),
+                None => detected.first().cloned().unwrap_or_else(|| format!("http://127.0.0.1:{port}")),
+            };
+            if listen.ip().is_loopback() {
+                eprintln!("warning: listening on {listen} only; use --listen 0.0.0.0:{port} so phones can connect");
+            }
+            if public_url.is_none() && netaddr::in_container() {
+                eprintln!(
+                    "warning: running in a container, {base} is an internal address phones can't reach.\n         \
+                     Set STREZZ_PUBLIC_URL=http://<your-computer-LAN-IP>:{port} (or use host networking)."
+                );
+            } else if public_url.is_none() && detected.is_empty() {
+                eprintln!("warning: no LAN address found; connect to Wi-Fi/Ethernet or pass --public-url");
+            }
             let join = format!("{base}/join?token={token}");
-            state.lock().unwrap().public_base = base.clone();
+            {
+                let mut c = state.lock().unwrap();
+                c.public_base = base.clone();
+                c.lan_urls = detected.clone();
+                if !c.lan_urls.contains(&base) {
+                    c.lan_urls.insert(0, base.clone());
+                }
+            }
 
             println!("\n  dashboard   {base}/?token={token}");
             println!("  phones      {join}");
@@ -111,6 +139,10 @@ async fn main() -> Result<()> {
             if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
                 println!("{}", qr.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build());
             }
+            if detected.len() > 1 && public_url.is_none() {
+                println!("  other addresses of this machine: {}", detected[1..].join(", "));
+            }
+            println!("  phones must be on the same Wi-Fi; allow incoming connections if the firewall asks.\n");
 
             tokio::spawn(coordinator::housekeeping(state.clone()));
             if !no_local_worker {
