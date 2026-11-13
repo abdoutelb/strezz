@@ -9,7 +9,7 @@ description = "Distributed website stress testing: turn every device on your net
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
-gethostname = "0.5"
+gethostname = "1.1"
 local-ip-address = "0.6"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rand = "0.8"
