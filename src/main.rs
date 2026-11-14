@@ -41,7 +41,7 @@ enum Cmd {
         name: Option<String>,
         /// Concurrent users this worker offers (default: 1000 per CPU core,
         /// at most 16000). The open-file limit is the ceiling either way.
-        #[arg(long)]
+        #[arg(long, env = "STREZZ_MAX_USERS")]
         max_users: Option<u32>,
     },
     /// Legacy mode: crawl the target and write a Locust file (what strezz 0.1 did).
@@ -69,7 +69,7 @@ struct CoordinatorArgs {
     no_local_worker: bool,
     /// Concurrent users the coordinator's own worker offers (default: 1000
     /// per CPU core, at most 16000).
-    #[arg(long)]
+    #[arg(long, env = "STREZZ_MAX_USERS")]
     max_users: Option<u32>,
     /// Extra paths to hit besides the crawled ones (repeatable).
     #[arg(long = "path")]
