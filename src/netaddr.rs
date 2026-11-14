@@ -2,6 +2,7 @@
 //! coordinator. `localhost`, Docker bridges and VPN tunnels are useless to a
 //! phone on Wi-Fi, so rank interfaces and prefer real LAN addresses.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 /// Interface name prefixes that never lead to the physical LAN.
@@ -70,7 +71,11 @@ pub fn rank(ifaces: &[(String, IpAddr)]) -> Vec<Ipv4Addr> {
         })
         .collect();
     found.sort();
-    found.dedup_by_key(|(_, ip)| *ip);
+    // One address can appear twice with different scores (once under its
+    // interface name, once as the default route), and after sorting by score
+    // the two are not always next to each other. Keep the best-ranked one.
+    let mut seen = HashSet::new();
+    found.retain(|(_, ip)| seen.insert(*ip));
     found.into_iter().map(|(_, ip)| ip).collect()
 }
 
@@ -116,6 +121,21 @@ mod tests {
             .any(|ip| ip.is_loopback() || ip.is_link_local()));
         assert!(!ranked.contains(&"172.17.0.1".parse().unwrap()));
         assert!(!ranked.contains(&"10.8.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn an_address_seen_under_two_names_is_listed_once() {
+        // Wi-Fi and Ethernet both up, and the default route repeats the first.
+        let ranked = rank(&[
+            ("en0".to_string(), v4("192.168.1.4")),
+            ("en1".to_string(), v4("192.168.1.77")),
+            ("default".to_string(), v4("192.168.1.4")),
+        ]);
+        let expected: Vec<Ipv4Addr> = vec![
+            "192.168.1.4".parse().unwrap(),
+            "192.168.1.77".parse().unwrap(),
+        ];
+        assert_eq!(ranked, expected);
     }
 
     #[test]

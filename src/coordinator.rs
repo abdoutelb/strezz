@@ -45,7 +45,8 @@ struct Point {
     t: u64,
     requests: u64,
     failures: u64,
-    p95_ms: f64,
+    /// `None` for a second in which no request completed.
+    p95_ms: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -55,6 +56,13 @@ struct Run {
     started: Instant,
     ended: Option<Instant>,
     stats: Stats,
+    /// The same totals split by worker type. Native workers time a request
+    /// until the whole body has arrived; browser workers can only time it
+    /// until the response headers arrive, and that time includes waiting for
+    /// one of the browser's few connections per host. Merged, the two would
+    /// pass for one measurement, so the dashboard also shows them apart.
+    native: Stats,
+    browser: Stats,
     /// Per-second buckets, keyed by seconds since start.
     per_sec: BTreeMap<u64, Stats>,
 }
@@ -139,11 +147,11 @@ impl Coordinator {
             target: self.target.clone(),
             paths: self.paths.clone(),
             users,
-            // Its share of the fleet spawn rate, but fast enough that even a small
-            // device next to a huge one fills its allocation within ~20s.
-            spawn_per_sec: (run.config.spawn_rate * share)
-                .max(users as f64 / 20.0)
-                .max(1.0),
+            // Its share of the fleet-wide spawn rate, so the fleet as a whole
+            // ramps at the rate that was asked for and every device finishes
+            // ramping at the same moment. The floor of one user per second
+            // only keeps a device with a tiny share from crawling.
+            spawn_per_sec: (run.config.spawn_rate * share).max(1.0),
             wait_min_ms: run.config.wait_min_ms,
             wait_max_ms: run.config.wait_max_ms.max(run.config.wait_min_ms),
             timeout_ms: run.config.timeout_ms,
@@ -188,6 +196,7 @@ impl Coordinator {
     pub fn sync(&mut self, req: SyncRequest) -> Option<Assignment> {
         let now = Instant::now();
         let w = self.workers.get_mut(&req.worker_id)?;
+        let kind = w.kind;
         let dt = (now - w.last_sync).as_secs_f64().max(0.001);
         w.last_seen = now;
         w.last_sync = now;
@@ -200,8 +209,15 @@ impl Coordinator {
 
         if let Some(run) = self.run.as_mut() {
             // Late deltas from a just-stopped run still count; stale run ids don't.
-            if req.run_id == run.id && !req.delta.is_empty() {
+            if req.run_id == run.id {
                 run.stats.merge(&req.delta);
+                match kind {
+                    WorkerKind::Native => run.native.merge(&req.delta),
+                    WorkerKind::Browser => run.browser.merge(&req.delta),
+                }
+                // Record the second even when nothing completed in it. An
+                // empty second is information too: leaving it out would make
+                // a slow test look faster than it is (see `status`).
                 let sec = (now - run.started).as_secs();
                 run.per_sec.entry(sec).or_default().merge(&req.delta);
                 while run.per_sec.len() > TIMELINE_SECS {
@@ -237,6 +253,8 @@ impl Coordinator {
             started: Instant::now(),
             ended: None,
             stats: Stats::default(),
+            native: Stats::default(),
+            browser: Stats::default(),
             per_sec: BTreeMap::new(),
         });
         id
@@ -297,7 +315,9 @@ impl Coordinator {
 
         let run = self.run.as_ref().map(|r| {
             let elapsed = r.elapsed().as_secs();
-            // Average over the last 5 complete seconds (the current one is partial).
+            // Average over the last 5 complete seconds (the current one is
+            // partial), counting every second a worker reported in, including
+            // those in which no request completed.
             let window: Vec<&Stats> = r
                 .per_sec
                 .range(elapsed.saturating_sub(5)..elapsed.max(1))
@@ -313,12 +333,19 @@ impl Coordinator {
                     t: *t,
                     requests: s.requests,
                     failures: s.failures,
-                    p95_ms: s.percentile(95.0),
+                    p95_ms: (s.requests > 0).then(|| s.percentile(95.0)),
                 })
                 .collect();
             let mut errors: Vec<_> = r.stats.errors.iter().collect();
             errors.sort_by(|a, b| b.1.cmp(a.1));
             errors.truncate(10);
+            let latency = |s: &Stats| {
+                json!({
+                    "requests": s.requests,
+                    "p50_ms": s.percentile(50.0), "p95_ms": s.percentile(95.0),
+                    "p99_ms": s.percentile(99.0),
+                })
+            };
             json!({
                 "id": r.id, "active": r.active(), "elapsed_secs": elapsed, "config": r.config,
                 "requests": r.stats.requests, "failures": r.stats.failures, "bytes": r.stats.bytes,
@@ -326,6 +353,7 @@ impl Coordinator {
                 "mean_ms": r.stats.mean_ms(),
                 "p50_ms": r.stats.percentile(50.0), "p95_ms": r.stats.percentile(95.0),
                 "p99_ms": r.stats.percentile(99.0),
+                "by_kind": { "native": latency(&r.native), "browser": latency(&r.browser) },
                 "active_users": self.alive().map(|w| w.active_users as u64).sum::<u64>(),
                 "errors": errors, "timeline": timeline,
             })
@@ -384,7 +412,10 @@ fn authorized(state: &Shared, headers: &HeaderMap, q: &TokenQuery) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .or_else(|| q.token.clone());
-    given.as_deref() == Some(expected.as_str())
+    // An empty token must never grant access, however the coordinator was
+    // started: it is exactly what a browser sends when the dashboard is
+    // opened without `?token=`.
+    !expected.is_empty() && given.as_deref() == Some(expected.as_str())
 }
 
 fn unauthorized() -> Response {
@@ -478,6 +509,10 @@ async fn start(
     if !authorized(&state, &headers, &q) {
         return unauthorized();
     }
+    let cfg = match cfg.validated() {
+        Ok(cfg) => cfg,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
     let mut c = state.lock().unwrap();
     c.stop();
     let id = c.start(cfg);
@@ -641,5 +676,215 @@ mod tests {
         let a = sync(&phone, Some(400));
         assert_eq!(a.users, 400);
         assert!(a.spawn_per_sec >= 20.0, "spawn={}", a.spawn_per_sec);
+    }
+
+    fn coordinator() -> Coordinator {
+        Coordinator::new("t".into(), "http://x/".into(), vec!["/".into()])
+    }
+
+    fn join(c: &mut Coordinator, kind: WorkerKind, capacity: u32) -> String {
+        let req = RegisterRequest {
+            name: format!("{kind:?}"),
+            kind,
+            capacity,
+            platform: "test".into(),
+        };
+        c.register(req).worker_id
+    }
+
+    fn run_with(users: u32, spawn_rate: f64) -> StartRun {
+        StartRun {
+            users,
+            spawn_rate,
+            duration_secs: 0,
+            wait_min_ms: 0,
+            wait_max_ms: 0,
+            timeout_ms: 1000,
+        }
+    }
+
+    /// Stats for `requests` requests that each took `latency_ms`.
+    fn sent(requests: u64, latency_ms: f64) -> Stats {
+        let mut stats = Stats::default();
+        for _ in 0..requests {
+            stats.record(latency_ms, 0, None);
+        }
+        stats
+    }
+
+    fn report(c: &mut Coordinator, id: &str, run_id: u64, delta: Stats) -> Assignment {
+        c.sync(SyncRequest {
+            worker_id: id.into(),
+            run_id,
+            active_users: 0,
+            delta,
+            capacity: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_configured_spawn_rate_is_shared_out_not_overridden() {
+        let mut c = coordinator();
+        let big = join(&mut c, WorkerKind::Native, 100_000);
+        let run = c.start(run_with(10_000, 50.0));
+        // One device: the whole rate, however many users are waiting to start.
+        let a = report(&mut c, &big, run, Stats::default());
+        assert_eq!((a.users, a.spawn_per_sec), (10_000, 50.0));
+
+        // Two equal devices: half each, so the fleet still adds 50 per second.
+        let other = join(&mut c, WorkerKind::Native, 100_000);
+        assert_eq!(
+            report(&mut c, &big, run, Stats::default()).spawn_per_sec,
+            25.0
+        );
+        assert_eq!(
+            report(&mut c, &other, run, Stats::default()).spawn_per_sec,
+            25.0
+        );
+    }
+
+    #[test]
+    fn a_device_with_a_tiny_share_still_ramps() {
+        let mut c = coordinator();
+        let phone = join(&mut c, WorkerKind::Browser, 6);
+        join(&mut c, WorkerKind::Native, 100_000);
+        let run = c.start(run_with(10_000, 50.0));
+        let a = report(&mut c, &phone, run, Stats::default());
+        assert_eq!((a.users, a.spawn_per_sec), (6, 1.0));
+    }
+
+    #[test]
+    fn slow_tests_are_not_reported_faster_than_they_are() {
+        let mut c = coordinator();
+        let w = join(&mut c, WorkerKind::Native, 100);
+        let run = c.start(run_with(1, 1.0));
+        // A sync that carries no completed request still records its second.
+        report(&mut c, &w, run, Stats::default());
+        assert_eq!(c.run.as_ref().unwrap().per_sec.len(), 1);
+
+        // Ten seconds in, with one request in the last five reported seconds.
+        let r = c.run.as_mut().unwrap();
+        r.started = Instant::now() - Duration::from_secs(10);
+        r.per_sec = (5..10)
+            .map(|sec| (sec, sent(u64::from(sec == 7), 20.0)))
+            .collect();
+        let status = c.status();
+        assert_eq!(status["run"]["rps"], 0.2);
+        // No latency is made up for the seconds in which nothing completed.
+        let timeline = status["run"]["timeline"].as_array().unwrap();
+        assert!(timeline[0]["p95_ms"].is_null());
+        assert!(timeline[2]["p95_ms"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn native_and_browser_latency_are_also_reported_apart() {
+        let mut c = coordinator();
+        let native = join(&mut c, WorkerKind::Native, 100);
+        let browser = join(&mut c, WorkerKind::Browser, 100);
+        let run = c.start(run_with(10, 10.0));
+        report(&mut c, &native, run, sent(10, 400.0));
+        report(&mut c, &browser, run, sent(30, 40.0));
+
+        let status = c.status();
+        let by_kind = &status["run"]["by_kind"];
+        assert_eq!(by_kind["native"]["requests"], 10);
+        assert_eq!(by_kind["browser"]["requests"], 30);
+        assert!(by_kind["native"]["p50_ms"].as_f64().unwrap() > 300.0);
+        assert!(by_kind["browser"]["p50_ms"].as_f64().unwrap() < 100.0);
+        assert_eq!(status["run"]["requests"], 40);
+    }
+
+    // ------------------------------------------------------------ HTTP layer
+
+    use crate::testutil::TestServer;
+
+    async fn served(token: &str) -> (TestServer, Shared) {
+        let state: Shared = Arc::new(Mutex::new(Coordinator::new(
+            token.into(),
+            "http://x/".into(),
+            vec!["/".into()],
+        )));
+        (TestServer::start(router(state.clone())).await, state)
+    }
+
+    async fn code(request: reqwest::RequestBuilder) -> u16 {
+        request.send().await.unwrap().status().as_u16()
+    }
+
+    #[tokio::test]
+    async fn the_api_needs_the_token_but_the_pages_do_not() {
+        let (server, _state) = served("secret").await;
+        let http = reqwest::Client::new();
+        let status = server.url("/api/status");
+
+        assert_eq!(code(http.get(&status)).await, 401);
+        assert_eq!(
+            code(http.get(&status).header(TOKEN_HEADER, "guess")).await,
+            401
+        );
+        assert_eq!(
+            code(http.get(server.url("/api/status?token=guess"))).await,
+            401
+        );
+        assert_eq!(code(http.post(server.url("/api/run/stop"))).await, 401);
+
+        assert_eq!(
+            code(http.get(&status).header(TOKEN_HEADER, "secret")).await,
+            200
+        );
+        assert_eq!(
+            code(http.get(server.url("/api/status?token=secret"))).await,
+            200
+        );
+
+        // The pages carry no data; they ask the API for it with the token.
+        assert_eq!(code(http.get(server.url("/"))).await, 200);
+        assert_eq!(code(http.get(server.url("/join"))).await, 200);
+    }
+
+    #[tokio::test]
+    async fn an_empty_token_never_opens_the_api() {
+        // However a coordinator ends up with an empty token, "no token" must
+        // not match it: that is what a browser sends without `?token=`.
+        let (server, _state) = served("").await;
+        let http = reqwest::Client::new();
+        let status = server.url("/api/status");
+
+        assert_eq!(code(http.get(&status).header(TOKEN_HEADER, "")).await, 401);
+        assert_eq!(code(http.get(server.url("/api/status?token="))).await, 401);
+        assert_eq!(code(http.get(&status)).await, 401);
+    }
+
+    #[tokio::test]
+    async fn starting_a_run_checks_its_settings() {
+        let (server, state) = served("secret").await;
+        let http = reqwest::Client::new();
+        let start = |body: serde_json::Value| {
+            http.post(server.url("/api/run/start"))
+                .header(TOKEN_HEADER, "secret")
+                .json(&body)
+        };
+
+        let refused = start(json!({ "users": 10, "spawn_rate": 0 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 400);
+        assert!(refused.text().await.unwrap().contains("spawn_rate"));
+        assert_eq!(
+            code(start(json!({ "users": 10, "timeout_ms": 0 }))).await,
+            400
+        );
+        assert!(
+            state.lock().unwrap().run.is_none(),
+            "nothing may have started"
+        );
+
+        let started = start(json!({ "users": 10 })).send().await.unwrap();
+        assert_eq!(started.status(), 200);
+        let body: serde_json::Value = started.json().await.unwrap();
+        assert_eq!(body["run_id"], 1);
+        assert!(state.lock().unwrap().run.as_ref().unwrap().active());
     }
 }
