@@ -59,6 +59,7 @@
     <div class="card tile"><b id="t-p99">–</b><span>p99 latency</span></div>
     <div class="card tile"><b id="t-total">0</b><span>requests · <span id="t-elapsed">0s</span></span></div>
   </div>
+  <div class="muted" id="bykind" hidden style="margin:-6px 0 16px"></div>
 
   <div class="cols">
     <div class="stack">
@@ -84,14 +85,14 @@
       <div class="card">
         <h2>Run</h2>
         <form id="form">
-          <label>Total users<input name="users" id="users" type="number" min="1" value="200"></label>
+          <label>Total users<input name="users" id="users" type="number" min="1" value="200" required></label>
           <label style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px;color:var(--fg);font-size:13px">
             <input type="checkbox" id="maxmode" style="width:auto"> Full fleet capacity: every device runs as many users as it can</label>
-          <label>Spawn rate /s<input name="spawn_rate" type="number" min="1" value="50"></label>
-          <label>Duration (s, 0 = ∞)<input name="duration_secs" type="number" min="0" value="60"></label>
-          <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000"></label>
-          <label>Wait min (ms)<input name="wait_min_ms" type="number" min="0" value="1000"></label>
-          <label>Wait max (ms)<input name="wait_max_ms" type="number" min="0" value="3000"></label>
+          <label>Spawn rate /s<input name="spawn_rate" type="number" min="1" value="50" required></label>
+          <label>Duration (s, 0 = ∞)<input name="duration_secs" type="number" min="0" value="60" required></label>
+          <label>Timeout (ms)<input name="timeout_ms" type="number" min="100" value="30000" required></label>
+          <label>Wait min (ms)<input name="wait_min_ms" type="number" min="0" value="1000" required></label>
+          <label>Wait max (ms)<input name="wait_max_ms" type="number" min="0" value="3000" required></label>
           <div class="btns"><button type="submit">Start</button><button type="button" class="stop" id="stop">Stop</button></div>
         </form>
         <div id="capwarn" class="warn" hidden></div>
@@ -121,6 +122,8 @@ const H = { "content-type": "application/json", "x-strezz-token": token };
 const fmt = (n) => Math.round(n).toLocaleString();
 const ms = (v) => v ? (v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(2) + " s") : "–";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+// Quote for a POSIX shell unless plainly safe as it stands (same rule as shell_quote in src/main.rs).
+const shq = (s) => /^[A-Za-z0-9\-_.,:\/@%+=]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
 let last = null, joinShown = "", chosenBase = null;
 $("maxmode").onchange = () => { $("users").disabled = $("maxmode").checked; };
 const LOOPBACK = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"];
@@ -130,7 +133,11 @@ $("addr").onchange = () => { chosenBase = $("addr").value; refresh(); };
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
-  const body = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, Number(v)]));
+  // `required` on the inputs keeps empty boxes from getting here; this is the second lock,
+  // because Number("") is 0 and 0 users means "every device at full capacity".
+  const fields = [...new FormData(e.target)];
+  if (fields.some(([, v]) => v.trim() === "" || !Number.isFinite(Number(v)))) return alert("Fill in every run setting with a number.");
+  const body = Object.fromEntries(fields.map(([k, v]) => [k, Number(v)]));
   if ($("maxmode").checked) body.users = 0;
   const r = await fetch("/api/run/start", { method: "POST", headers: H, body: JSON.stringify(body) });
   if (!r.ok) alert(await r.text());
@@ -151,10 +158,15 @@ function drawChart(timeline) {
   const x = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 50);
   const series = (key, color, max) => {
     g.strokeStyle = color; g.lineWidth = 2; g.beginPath();
-    pts.forEach((p, i) => { const y = h - 8 - (p[key] / (max || 1)) * (h - 24); i ? g.lineTo(x(p.t), y) : g.moveTo(x(p.t), y); });
+    let drawing = false;
+    pts.forEach((p) => {
+      if (p[key] == null) return;   // p95 of a second in which nothing completed
+      const y = h - 8 - (p[key] / (max || 1)) * (h - 24);
+      drawing ? g.lineTo(x(p.t), y) : g.moveTo(x(p.t), y); drawing = true;
+    });
     g.stroke();
   };
-  const maxR = Math.max(...pts.map((p) => p.requests), 1), maxP = Math.max(...pts.map((p) => p.p95_ms), 1);
+  const maxR = Math.max(...pts.map((p) => p.requests), 1), maxP = Math.max(...pts.map((p) => p.p95_ms || 0), 1);
   series("requests", col("--accent"), maxR); series("failures", col("--bad"), maxR); series("p95_ms", col("--p95"), maxP);
   g.font = "11px system-ui"; g.fillStyle = col("--accent"); g.fillText(fmt(maxR) + "/s", w - 46, 14);
   g.fillStyle = col("--p95"); g.fillText(ms(maxP), w - 46, 28);
@@ -183,7 +195,7 @@ async function refresh() {
     joinShown = join;
     $("qr").src = "/api/qr.svg?data=" + encodeURIComponent(join);
     $("joinurl").textContent = join;
-    $("cmd").textContent = "strezz worker --coordinator " + base + " --token " + token;
+    $("cmd").textContent = "strezz worker --coordinator " + base + " --token " + shq(token);
   }
   $("pathcount").textContent = "(" + s.paths.length + ")";
   $("paths").innerHTML = s.paths.map(esc).join("<br>");
@@ -198,10 +210,15 @@ async function refresh() {
     $("runstate").textContent = (run.active ? "Running" : "Finished") + " · run " + run.id + " · " + (run.config.users || "max") + " users";
     $("errors").innerHTML = run.errors.length ? run.errors.map(([k, v]) => esc(k) + ": <b>" + fmt(v) + "</b>").join("<br>") : "None";
     drawChart(run.timeline);
+    // Native and browser workers time requests differently, so a mixed fleet gets both.
+    const k = run.by_kind, mixed = !!(k && k.native.requests && k.browser.requests);
+    $("bykind").hidden = !mixed;
+    if (mixed) $("bykind").textContent = "Latency by worker type · native (whole response): p50 " + ms(k.native.p50_ms) + ", p95 " + ms(k.native.p95_ms)
+      + " · browser (until the response starts, including time queued in the browser): p50 " + ms(k.browser.p50_ms) + ", p95 " + ms(k.browser.p95_ms);
     const want = run.config.users;
     $("capwarn").hidden = !(run.active && want > 0 && want > s.fleet_capacity);
     $("capwarn").textContent = "The fleet can hold " + fmt(s.fleet_capacity) + " of " + fmt(want) + " users. Add more devices to reach the full load.";
-  } else drawChart([]);
+  } else { drawChart([]); $("bykind").hidden = true; }
 
   $("workers").innerHTML = s.workers.length ? s.workers.map((w) => {
     const pct = w.capacity ? Math.min(100, 100 * w.active_users / w.capacity) : 0;
