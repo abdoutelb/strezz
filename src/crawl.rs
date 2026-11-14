@@ -75,9 +75,33 @@ pub fn extract_paths(html: &str, base: &Url) -> Vec<String> {
             path.push('?');
             path.push_str(q);
         }
-        paths.insert(path);
+        // `https://example.com//about` is on this site, but its path `//about`
+        // names another host once a worker joins it back onto the target.
+        if stays_on_site(base, &path) {
+            paths.insert(path);
+        }
     }
     paths.into_iter().collect()
+}
+
+/// True when `path`, used the way workers use it (joined onto `target` like a
+/// link on a page), still leads to `target`'s own site. A path starting with
+/// `//` is a host name to a URL parser, and a whole URL is taken as it stands.
+pub fn stays_on_site(target: &Url, path: &str) -> bool {
+    target
+        .join(path)
+        .is_ok_and(|url| url.origin() == target.origin())
+}
+
+/// True when a redirect from `asked` to `landed` stays on the site that was
+/// asked for: the same host, give or take a leading `www.`. Scheme and port
+/// may differ, which is what http -> https does.
+pub fn same_site(asked: &Url, landed: &Url) -> bool {
+    let host = |url: &Url| {
+        url.host_str()
+            .map(|h| h.strip_prefix("www.").unwrap_or(h).to_owned())
+    };
+    host(asked).is_some() && host(asked) == host(landed)
 }
 
 /// Drop the paths that contain any of `patterns`, for links a load test
@@ -105,6 +129,7 @@ mod tests {
             <a href="/search?q=a b">Search</a>
             <a href="https://example.com/pricing">Pricing</a>
             <a href="//cdn.other.com/x.js">CDN</a>
+            <a href="https://example.com//doubled/slash">Doubled slash</a>
             <a href="https://google.com/">Google</a>
             <a href="#top">Top</a>
             <a href="mailto:hi@example.com">Mail</a>
@@ -120,6 +145,42 @@ mod tests {
     fn empty_page_still_has_root() {
         let base = Url::parse("http://localhost:8080/").unwrap();
         assert_eq!(extract_paths("", &base), vec!["/"]);
+    }
+
+    #[test]
+    fn paths_that_would_lead_to_another_host_are_recognised() {
+        let target = Url::parse("https://example.com/shop/").unwrap();
+        for path in ["/", "/about", "search?q=1", "/a//b"] {
+            assert!(stays_on_site(&target, path), "{path}");
+        }
+        let elsewhere = [
+            "//about",
+            "//cdn.other.net/x",
+            "https://other.example/",
+            "http://example.com/",
+        ];
+        for path in elsewhere {
+            assert!(!stays_on_site(&target, path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_redirect_stays_on_the_site_only_if_the_host_does() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let same = |a: &str, b: &str| same_site(&url(a), &url(b));
+        assert!(same("http://example.com/", "https://example.com/"));
+        assert!(same("http://example.com/", "https://www.example.com/en/"));
+        assert!(same("https://www.example.com/", "https://example.com/"));
+        assert!(same(
+            "http://example.com:8080/",
+            "https://example.com:8443/"
+        ));
+        assert!(!same("http://example.com/", "https://login.example.com/"));
+        assert!(!same("http://example.com/", "https://example.org/"));
+        assert!(!same(
+            "http://intranet.example/",
+            "https://sso.other.net/login"
+        ));
     }
 
     #[test]

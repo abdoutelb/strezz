@@ -12,7 +12,7 @@ import { describe, test } from "node:test";
 import vm from "node:vm";
 
 const html = readFileSync(new URL("./join.html", import.meta.url), "utf8");
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 const LOST_MS = Number(script.match(/LOST_MS = (\d+)/)[1]);
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -38,8 +38,12 @@ function open({ replyAfterMs = 10, assignment = RUN } = {}) {
   const element = (id) =>
     (elements[id] ??= { id, textContent: "", innerHTML: "", className: "", value: "", checked: true, disabled: false });
 
-  // What the fake coordinator and the fake site saw.
-  const seen = { hits: 0, calls: 0, registers: 0, syncs: 0, reported: 0 };
+  // What the fake coordinator and the fake site saw. `reported` and `byRun` count each
+  // numbered batch of stats once, as the real coordinator does; `repeats` counts resends.
+  const seen = {
+    hits: 0, hosts: new Set(), calls: 0, registers: 0, syncs: 0,
+    reported: 0, byRun: {}, repeats: 0, lastSeq: 0,
+  };
   // How the fake coordinator behaves. Tests change this as they go.
   const coordinator = { mode: "ok", replyAfterMs, assignment };
   let waitingForSync = [];
@@ -54,6 +58,7 @@ function open({ replyAfterMs = 10, assignment = RUN } = {}) {
   const fetch = async (url, options = {}) => {
     if (!url.startsWith("/api/")) {
       seen.hits++;
+      seen.hosts.add(new URL(url).host);
       await pause(5, options.signal);
       return { ok: true, status: 0 };
     }
@@ -70,7 +75,14 @@ function open({ replyAfterMs = 10, assignment = RUN } = {}) {
     const body = JSON.parse(options.body);
     if (coordinator.mode === "restarted" && body.worker_id === "w1") return reply(404, "unknown worker, register again");
     seen.syncs++;
-    seen.reported += body.delta.requests;
+    if (body.seq && body.seq <= seen.lastSeq) seen.repeats++;
+    else {
+      seen.lastSeq = Math.max(seen.lastSeq, body.seq);
+      seen.reported += body.delta.requests;
+      if (body.delta.requests) seen.byRun[body.run_id] = (seen.byRun[body.run_id] || 0) + body.delta.requests;
+    }
+    // "mute": the sync arrived and was counted, but its answer never makes it back.
+    if (coordinator.mode === "mute") throw new TypeError("Failed to fetch");
     return reply(200, { ...coordinator.assignment });
   };
 
@@ -89,6 +101,9 @@ function open({ replyAfterMs = 10, assignment = RUN } = {}) {
     /** Tap the Join / Leave button. */
     tap: () => elements.toggle.onclick(),
     users: () => peek("users.length"),
+    /** Requests the page has completed that the coordinator has not acknowledged yet. */
+    unreported: () =>
+      peek("delta.requests + waiting.reduce((n, b) => n + b.delta.requests, 0) + (sending ? sending.delta.requests : 0)"),
     /** Resolves when the page's next sync request reaches the coordinator. */
     nextSync: () => new Promise((resolve) => waitingForSync.push(resolve)),
     /** Requests the site under test receives during the next `ms`. */
@@ -113,6 +128,13 @@ async function joined(options) {
   page.tap();
   await page.until("load on the target", () => page.users() > 0 && page.seen.hits > 20);
   return page;
+}
+
+/** Leave, let the last answers land, and check that every completed request is accounted for exactly once. */
+async function leaveAndCheckTheBooks(page) {
+  page.tap();
+  await wait(400);
+  assert.equal(page.seen.reported + page.unreported(), page.peek("totals.sent"));
 }
 
 describe("browser worker page", { concurrency: true }, () => {
@@ -153,6 +175,7 @@ describe("browser worker page", { concurrency: true }, () => {
     // used to hardcode it would be 2.
     assert.ok(page.seen.syncs - before >= 4, `only ${page.seen.syncs - before} syncs in 2 s`);
     assert.ok(page.seen.reported > 0);
+    assert.deepEqual(Object.keys(page.seen.byRun), [String(RUN.run_id)]);
     page.tap();
   });
 
@@ -176,6 +199,15 @@ describe("browser worker page", { concurrency: true }, () => {
     page.tap();
   });
 
+  test("only the target's own site is loaded", async () => {
+    // Resolved like links on a page, the last three paths lead to other hosts.
+    const paths = ["/", "/about", "//about", "//cdn.other.test/x", "https://other.test/"];
+    const page = await joined({ assignment: { ...RUN, paths } });
+    await wait(500);
+    assert.deepEqual([...page.seen.hosts], ["target.test"]);
+    page.tap();
+  });
+
   for (const mode of ["down", "silent"]) {
     test(`users stop by themselves when the coordinator is ${mode}`, async () => {
       const page = await joined();
@@ -189,7 +221,12 @@ describe("browser worker page", { concurrency: true }, () => {
       // It keeps trying, and picks the run up again when the coordinator is back.
       page.coordinator.mode = "ok";
       await page.until("the page to resume", () => page.users() > 0);
-      page.tap();
+      await page.nextSync();
+      await page.nextSync();
+      await leaveAndCheckTheBooks(page);
+      // What the users did before the cut-off was reported as part of their run, not as
+      // the stats of no run at all.
+      assert.deepEqual(Object.keys(page.seen.byRun), [String(RUN.run_id)]);
     });
   }
 
@@ -226,11 +263,21 @@ describe("browser worker page", { concurrency: true }, () => {
     page.coordinator.mode = "ok";
     await page.nextSync();
     await page.nextSync();
-    page.tap(); // Leave: no more requests, no more syncs.
-    await wait(400);
+    await leaveAndCheckTheBooks(page);
+  });
 
-    // Every completed request was either reported or is still waiting to be.
-    const waiting = page.peek("delta.requests");
-    assert.equal(page.seen.reported + waiting, page.peek("totals.sent"));
+  test("a sync whose answer is lost is not counted twice", async () => {
+    const page = await joined();
+    page.coordinator.mode = "mute"; // syncs arrive and are counted, their answers do not
+    await page.nextSync();
+    await page.nextSync();
+    await page.nextSync();
+    page.coordinator.mode = "ok";
+    await page.nextSync();
+    await page.nextSync();
+    await page.nextSync();
+
+    assert.ok(page.seen.repeats > 0, "the page should have sent the same batch again");
+    await leaveAndCheckTheBooks(page);
   });
 });

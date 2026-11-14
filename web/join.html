@@ -115,6 +115,12 @@ $("capacity").value = capacity;
 let joined = false, session = 0, workerId = null, plan = { run_id: 0, users: 0 }, users = [], delta = newDelta();
 let spawnBudget = 0, lastTick = performance.now(), lastContact = performance.now(), syncMs = 1000;
 let totals = { sent: 0, fails: 0 }, wakeLock = null, timer = null;
+// Stats travel to the coordinator in numbered batches. A batch whose sync failed is sent
+// again unchanged under the same number, and the coordinator applies each number once, so
+// a retry can neither lose stats nor count them twice. Every batch also names the run its
+// stats were collected in, which may be over by the time the batch gets through.
+// `sending` is the batch being delivered; `waiting` holds stats that have no number yet.
+let sending = null, waiting = [], lastSeq = 0;
 
 // ---- auto-tune measurements
 let win = newWindow(), baseline = null, prevRps = null, holds = 0, fullSince = null;
@@ -229,18 +235,31 @@ async function virtualUser(p, urls, signal) {
 
 function stopUsers(n = 0) { while (users.length > n) users.pop().abort(); }
 
-// Drop every user and forget the run, so that the next assignment ramps up from zero.
-function stopRun() {
-  stopUsers(); spawnBudget = 0; plan = { run_id: 0, users: 0 };
-  baseline = prevRps = fullSince = null; holds = 0; win = newWindow();
+// Queue what the users recorded since the last call, as stats of run `runId`.
+function collect(runId) {
+  if (!delta.requests) return;
+  const last = waiting[waiting.length - 1];
+  if (last && last.run_id === runId) {
+    const into = last.delta;
+    into.requests += delta.requests; into.failures += delta.failures; into.bytes += delta.bytes;
+    into.latency_sum_ms += delta.latency_sum_ms;
+    delta.hist.forEach((n, i) => { into.hist[i] += n; });
+    for (const k in delta.errors) into.errors[k] = (into.errors[k] || 0) + delta.errors[k];
+  } else waiting.push({ run_id: runId, delta });
+  delta = newDelta();
 }
 
-// Put a delta that could not be sent back, so a failed sync does not lose its numbers.
-function restore(sent) {
-  delta.requests += sent.requests; delta.failures += sent.failures; delta.bytes += sent.bytes;
-  delta.latency_sum_ms += sent.latency_sum_ms;
-  sent.hist.forEach((n, i) => { delta.hist[i] += n; });
-  for (const k in sent.errors) delta.errors[k] = (delta.errors[k] || 0) + sent.errors[k];
+// The batch to send with the next sync, if there are stats to send.
+function nextBatch() {
+  if (!sending && waiting.length) sending = { seq: ++lastSeq, ...waiting.shift() };
+  return sending;
+}
+
+// Drop every user and forget the run, so that the next assignment ramps up from zero.
+function stopRun() {
+  collect(plan.run_id);   // what the users did until now still belongs to their run
+  stopUsers(); spawnBudget = 0; plan = { run_id: 0, users: 0 };
+  baseline = prevRps = fullSince = null; holds = 0; win = newWindow();
 }
 
 const lost = () => performance.now() - lastContact > LOST_MS;
@@ -256,7 +275,6 @@ setInterval(() => {
 
 async function tick(mine) {
   if (mine !== session) return;
-  let unsent = null;
   try {
     if (!workerId) {
       const name = (navigator.userAgentData?.platform || navigator.platform || "device") + " browser · " + device.cores + " cores";
@@ -265,9 +283,14 @@ async function tick(mine) {
       workerId = r.worker_id; syncMs = clamp(r.sync_interval_ms || 1000, 100, 5000); lastContact = performance.now();
     }
     autoTune();
-    const sent = delta; delta = newDelta(); unsent = sent;
-    const next = await api("/api/sync", { worker_id: workerId, run_id: plan.run_id, active_users: users.length, delta: sent, capacity });
-    unsent = null;
+    collect(plan.run_id);
+    const batch = nextBatch();
+    const next = await api("/api/sync", {
+      worker_id: workerId, active_users: users.length, capacity,
+      run_id: batch ? batch.run_id : plan.run_id, seq: batch ? batch.seq : 0, delta: batch ? batch.delta : newDelta(),
+    });
+    // The coordinator has that batch now, whatever became of this session meanwhile.
+    if (batch && sending === batch) sending = null;
     // "Leave fleet" may have been tapped while that request was in flight. This tick then
     // belongs to a session that is over, and must not start users nobody will stop.
     if (mine !== session) return;
@@ -281,21 +304,25 @@ async function tick(mine) {
       spawnBudget = Math.min(want, spawnBudget + next.spawn_per_sec * dt);
       const add = Math.min(Math.floor(spawnBudget), want - users.length);
       spawnBudget -= add;
-      const urls = add ? next.paths.map((x) => new URL(x, next.target).href) : [];
+      // Only URLs on the target's own site. A path is resolved like a link on a page, so
+      // one starting with // or a whole URL would otherwise lead to another host.
+      const site = new URL(next.target).origin;
+      const urls = add ? next.paths.map((x) => new URL(x, next.target)).filter((u) => u.origin === site).map((u) => u.href) : [];
       for (let i = 0; i < add && urls.length; i++) { const c = new AbortController(); users.push(c); virtualUser(next, urls, c.signal); }
     }
-    $("rps").textContent = Math.round(sent.requests / Math.max(dt, 0.001));
+    $("rps").textContent = Math.round((batch ? batch.delta.requests : 0) / Math.max(dt, 0.001));
     plan = next;
     $("state").textContent = next.run_id ? "running · run " + next.run_id : "joined · waiting for a run";
     $("state").className = "pill on";
     $("target").textContent = next.target ? new URL(next.target).host : "";
   } catch (e) {
     if (mine !== session) return;
-    if (unsent) restore(unsent);
+    // A batch that was on its way stays in `sending` and goes out again with the next sync.
     // A wrong token never becomes right: stop, instead of knocking every second.
     if (e.status === 401) return leave("bad token · scan the QR code again");
-    // 404: the coordinator restarted and no longer tracks the run this page was part of.
-    if (e.status === 404) { workerId = null; stopRun(); }
+    // 404: the coordinator restarted. It no longer tracks the run this page was part of,
+    // and has no run for the stats that were waiting.
+    if (e.status === 404) { workerId = null; stopRun(); sending = null; waiting = []; }
     $("state").textContent = lost() ? LOST_TEXT : "reconnecting…";
     $("state").className = "pill";
   }

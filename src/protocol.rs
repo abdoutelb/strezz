@@ -41,13 +41,20 @@ pub struct RegisterResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRequest {
     pub worker_id: String,
-    /// The run the stats delta belongs to (0 = none).
+    /// The run the stats in `delta` were collected in (0 = none). Usually the
+    /// run in progress, but a batch delayed by failed syncs may be older.
     pub run_id: u64,
     /// Virtual users currently alive on the worker.
     pub active_users: u32,
-    /// Stats collected since the previous sync.
+    /// A batch of stats collected by this worker.
     #[serde(default)]
     pub delta: Stats,
+    /// Number of that batch, counting up from 1. A batch whose sync failed is
+    /// sent again unchanged under the same number, and the coordinator applies
+    /// each number once, so a retry can neither lose stats nor count them
+    /// twice. 0 (or absent) means "not numbered": always applied.
+    #[serde(default)]
+    pub seq: u64,
     /// Updated capacity, for workers that tune themselves (browser auto-tune).
     #[serde(default)]
     pub capacity: Option<u32>,

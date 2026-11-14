@@ -255,7 +255,7 @@ strezz worker                      # STREZZ_MAX_USERS=2000 works like --max-user
 |---|---|---|
 | **Total users** | 200 | Concurrent virtual users across the whole fleet. |
 | **Full fleet capacity** | off | Ignore *Total users* and give every device as many users as it can hold (API: `users: 0`). |
-| **Spawn rate /s** | 50 | Users added per second across the fleet while ramping up. Each device adds its share of this rate (at least one user per second), so the fleet finishes ramping together after about *users ÷ spawn rate* seconds. |
+| **Spawn rate /s** | 50 | Users added per second across the whole fleet. The rate is shared between devices according to how many users each still has to start, so the fleet finishes ramping together after about *users ÷ spawn rate* seconds. |
 | **Duration (s)** | 60 | Stop automatically after this many seconds. `0` runs until you press **Stop**. |
 | **Timeout (ms)** | 30000 | A request taking longer than this counts as a failure (`timeout`). At least 100. |
 | **Wait min / max (ms)** | 1000 / 3000 | Think time between two requests from the same user. Set both to `0` for maximum pressure, where each user fires back-to-back. |
@@ -280,7 +280,8 @@ Each user sends roughly `1 / (avg response time + avg think time)` requests per 
 The coordinator loads `--url` and keeps every link on the same site (same scheme, host and port).
 It drops fragments (`#…`), removes duplicates, and always includes `/`.
 
-- **Add paths** with `--path`.
+- **Add paths** with `--path`. A path is resolved like a link on the target page and must stay
+  on the target's site; one that leads to another host is skipped with a warning.
 - **Leave crawled paths out** with `--exclude TEXT`, which drops every crawled path containing
   that text. Use it for links a load test should not hammer: `/logout`, large downloads, admin
   pages. Paths given with `--path` are always kept.
@@ -292,9 +293,11 @@ strezz coordinator --url https://shop.example/ \
   --exclude /logout --exclude .zip --exclude /admin/
 ```
 
-**Redirects.** If `--url` redirects to another address (`http://` to `https://`, or the bare
-domain to `www.`), Strezz tests the address it ended up at and prints a warning saying so. Check
-that warning: it names the site that will receive the load.
+**Redirects.** If `--url` redirects within the same site (`http://` to `https://`, or the bare
+domain to `www.`), Strezz says so and tests the address it ended up at. If it redirects to a
+**different site**, such as a single sign-on page on another domain, the coordinator stops with
+an error instead of pointing the fleet at an address you did not name. To test that address on
+purpose, pass it as `--url`.
 
 The crawl gives up after 15 seconds; the coordinator then starts anyway and tests `/` only.
 
@@ -584,10 +587,11 @@ Use this to write your own worker.
 // POST /api/sync, once per second
 {
   "worker_id": "a1b2c3d4",
-  "run_id": 3,                 // run the delta belongs to (0 = none)
+  "run_id": 3,                 // run the stats in `delta` were collected in (0 = none)
+  "seq": 42,                   // number of this batch of stats (see the sync rules)
   "active_users": 120,
   "capacity": 500,             // optional: update capacity live
-  "delta": {                   // stats since the previous sync
+  "delta": {                   // a batch of stats
     "requests": 240, "failures": 2, "bytes": 1843200, "latency_sum_ms": 21600.5,
     "hist": [/* 64 bucket counts */],
     "errors": { "HTTP 503": 2 }
@@ -608,12 +612,16 @@ Use this to write your own worker.
 **Sync rules:**
 - Sync every `sync_interval_ms` (from the register response; one second).
 - Drop all users when `run_id` changes.
-- Converge to `users`, adding at most `spawn_per_sec` per second.
+- Converge to `users`, adding at most `spawn_per_sec` per second. Only request URLs on the
+  target's own origin.
 - **Stop all users when no sync has succeeded for 10 seconds.** Keep trying to sync, and start
   again from zero when it works.
 - On `404`, stop all users and register again: the coordinator restarted.
 - On `401`, stop for good: the token is wrong.
-- If a sync fails, send its stats again with the next one.
+- Number each batch of stats with `seq`, counting up from 1. If a sync fails, send the same
+  batch again under the same number, with the `run_id` it was collected in. The coordinator
+  applies each number once, so a retry neither loses stats nor counts them twice. Leaving `seq`
+  out (or 0) means the batch is always applied.
 
 ## Security
 
@@ -627,8 +635,8 @@ Use this to write your own worker.
 - **LAN only.** Don't port-forward 4000 to the internet. Anyone with the token could point your
   fleet at a run and start it.
 - **Fixed target.** The target is set when the coordinator starts and can't be changed over the
-  API. Workers only ever hit that one site. If `--url` redirects elsewhere, the coordinator says
-  so at startup and tests the address it was redirected to.
+  API. Workers only request URLs on that site's origin. A `--url` that redirects within the same
+  site is followed; one that redirects to a different site stops the coordinator.
 - **Fail-safe workers.** Stopping the coordinator stops the test: every worker that cannot sync
   for 10 seconds drops its users, so a crash, a closed laptop or Ctrl-C never leaves devices
   loading the site.

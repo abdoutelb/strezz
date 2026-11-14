@@ -8,6 +8,8 @@ use anyhow::{bail, Context, Result};
 use rand::seq::IndexedRandom;
 use rand::RngExt;
 use reqwest::StatusCode;
+use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -75,10 +77,14 @@ struct Plan {
 impl Plan {
     fn new(assignment: &Assignment) -> Result<Self> {
         let target = Url::parse(&assignment.target).context("bad target url from coordinator")?;
+        // A path is joined onto the target like a link on a page, so one that
+        // starts with `//` or is a whole URL would lead to another host. This
+        // worker only ever loads the site it was pointed at.
         let urls: Vec<Url> = assignment
             .paths
             .iter()
             .filter_map(|p| target.join(p).ok())
+            .filter(|url| url.origin() == target.origin())
             .collect();
         if urls.is_empty() {
             bail!("the coordinator sent no usable paths for {target}");
@@ -126,6 +132,10 @@ impl Running {
                 println!("idle");
             }
         }
+        // A user whose task ended by itself (it could not build its HTTP
+        // client) is not running any more, so it is replaced like any other
+        // missing user.
+        self.users.retain(|user| !user.0.is_finished());
         let want = next.users as usize;
         if self.users.len() > want {
             self.users.truncate(want);
@@ -148,6 +158,76 @@ impl Running {
         }
         self.assignment = next;
         Ok(())
+    }
+}
+
+/// A batch of stats on its way to the coordinator.
+struct Batch {
+    seq: u64,
+    run_id: u64,
+    delta: Stats,
+}
+
+/// Stats waiting to reach the coordinator.
+///
+/// They travel in numbered batches. A batch whose sync failed is sent again
+/// unchanged under the same number, and the coordinator applies each number
+/// once, so a retry can neither lose stats nor count them twice. Every batch
+/// also names the run its stats were collected in, which may be over by the
+/// time the batch gets through.
+#[derive(Default)]
+struct Outbox {
+    /// The batch being delivered. It never changes once it has a number.
+    sending: Option<Batch>,
+    /// Stats not yet numbered, oldest first: `(run id, stats)`.
+    waiting: VecDeque<(u64, Stats)>,
+    last_seq: u64,
+}
+
+impl Outbox {
+    /// Queue what the users recorded since the last call, as stats of `run_id`.
+    fn collect(&mut self, shared: &Shared, run_id: u64) {
+        let delta = std::mem::take(&mut *shared.stats.lock().unwrap());
+        if delta.requests == 0 {
+            return;
+        }
+        match self.waiting.back_mut() {
+            Some((run, stats)) if *run == run_id => stats.merge(&delta),
+            _ => self.waiting.push_back((run_id, delta)),
+        }
+    }
+
+    /// The batch to send with the next sync, if there are stats to send.
+    fn next(&mut self) -> Option<&Batch> {
+        if self.sending.is_none() {
+            let (run_id, delta) = self.waiting.pop_front()?;
+            self.last_seq += 1;
+            self.sending = Some(Batch {
+                seq: self.last_seq,
+                run_id,
+                delta,
+            });
+        }
+        self.sending.as_ref()
+    }
+
+    /// The coordinator has the batch that was being sent.
+    fn delivered(&mut self) {
+        self.sending = None;
+    }
+
+    /// Forget everything: the coordinator these stats were for is gone.
+    fn clear(&mut self) {
+        self.sending = None;
+        self.waiting.clear();
+    }
+}
+
+/// `future`'s output, or `None` if `deadline` comes first.
+async fn before<T>(deadline: Option<Instant>, future: impl Future<Output = T>) -> Option<T> {
+    match deadline {
+        Some(at) => tokio::time::timeout_at(at.into(), future).await.ok(),
+        None => Some(future.await),
     }
 }
 
@@ -218,6 +298,7 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
         active: AtomicU32::new(0),
     });
     let mut running = Running::default();
+    let mut outbox = Outbox::default();
     let mut worker_id: Option<String> = None;
     let mut sync_interval = Duration::from_secs(1);
     let mut last_tick = Instant::now();
@@ -233,10 +314,18 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
                 last_contact.elapsed(),
                 running.users.len()
             );
+            // What the users did until now still belongs to their run.
+            outbox.collect(&shared, running.assignment.run_id);
             running.stop();
         }
+        // While users are running, nothing below waits past the moment that
+        // switch is due: a sync to a coordinator that has gone silent would
+        // otherwise hold it back until the call times out by itself.
+        let cutoff = (!running.users.is_empty()).then(|| last_contact + opts.lost_after);
 
-        // (Re-)register whenever we don't have an id (startup, coordinator restart).
+        // (Re-)register whenever we don't have an id: at startup, and after a
+        // coordinator restart, which stops every user first. So no users are
+        // running here and there is no cut-off to keep.
         let id = match &worker_id {
             Some(id) => id.clone(),
             None => {
@@ -262,17 +351,10 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
                     }
                     Err(ApiError::Status(StatusCode::UNAUTHORIZED, _)) => bail!(TOKEN_REJECTED),
                     Err(e) => {
-                        // While users are running, come back quickly so the
-                        // cut-off above is checked on time.
-                        let pause = if running.users.is_empty() {
-                            backoff
-                        } else {
-                            backoff.min(Duration::from_secs(1))
-                        };
                         eprintln!(
-                            "cannot register with the coordinator: {e}; retrying in {pause:?}"
+                            "cannot register with the coordinator: {e}; retrying in {backoff:?}"
                         );
-                        tokio::time::sleep(pause).await;
+                        tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(10));
                         continue;
                     }
@@ -280,39 +362,50 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
             }
         };
 
-        let delta = std::mem::take(&mut *shared.stats.lock().unwrap());
+        outbox.collect(&shared, running.assignment.run_id);
+        let batch = outbox.next();
         let req = SyncRequest {
             worker_id: id,
-            run_id: running.assignment.run_id,
+            run_id: batch.map_or(running.assignment.run_id, |b| b.run_id),
             active_users: shared.active.load(Ordering::Relaxed),
-            delta,
+            delta: batch.map(|b| b.delta.clone()).unwrap_or_default(),
+            seq: batch.map_or(0, |b| b.seq),
             capacity: None,
         };
-        let next = match post::<_, Assignment>(&control, api("api/sync"), &opts.token, &req).await {
-            Ok(next) => next,
-            Err(e) => {
-                // Keep the stats for the next sync instead of losing them. If
-                // the coordinator did get this request and only its answer was
-                // lost they are counted twice, which is rarer and does less
-                // harm than dropping every interval that hits a network blip.
-                shared.stats.lock().unwrap().merge(&req.delta);
-                match e {
-                    ApiError::Status(StatusCode::UNAUTHORIZED, _) => bail!(TOKEN_REJECTED),
-                    ApiError::Status(StatusCode::NOT_FOUND, _) => {
+        let call = post::<_, Assignment>(&control, api("api/sync"), &opts.token, &req);
+        let next = match before(cutoff, call).await {
+            Some(Ok(next)) => next,
+            // The batch stays in the outbox and goes out again with the next sync.
+            failed => {
+                match failed {
+                    Some(Err(ApiError::Status(StatusCode::UNAUTHORIZED, _))) => {
+                        bail!(TOKEN_REJECTED)
+                    }
+                    Some(Err(ApiError::Status(StatusCode::NOT_FOUND, _))) => {
                         // It restarted, or dropped us after a long silence.
-                        // Either way it is not tracking what we are running.
+                        // Either way it is not tracking what we are running,
+                        // and has no run for the stats we were holding.
                         println!("the coordinator no longer knows this worker: registering again");
                         running.stop();
+                        outbox.clear();
                         worker_id = None;
                     }
-                    e => eprintln!("sync failed: {e}"),
+                    Some(Err(e)) => eprintln!("sync failed: {e}"),
+                    // The cut-off came first. The top of the loop acts on it.
+                    None | Some(Ok(_)) => {}
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                before(cutoff, tokio::time::sleep(Duration::from_secs(1))).await;
                 continue;
             }
         };
+        outbox.delivered();
         last_contact = Instant::now();
 
+        if next.run_id != running.assignment.run_id {
+            // Requests that finished while that sync was under way belong to
+            // the run that is ending, not to the one about to start.
+            outbox.collect(&shared, running.assignment.run_id);
+        }
         // After a gap (failed syncs, a stop) do not release the users the
         // spawn rate "earned" meanwhile in one burst: ramp again instead.
         let dt = last_tick.elapsed().min(sync_interval * 3).as_secs_f64();
@@ -477,8 +570,11 @@ mod tests {
     use super::*;
     use crate::coordinator::{self, Coordinator};
     use crate::testutil::TestServer;
+    use axum::extract::Request;
+    use axum::middleware::{self, Next};
+    use axum::response::IntoResponse;
     use axum::Router;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicU8};
 
     /// An error with a cause, to build the chains reqwest produces.
     #[derive(Debug)]
@@ -572,6 +668,65 @@ mod tests {
         // Idle: everything stops.
         running.apply(Assignment::idle(), 1.0, &shared).unwrap();
         assert!(running.users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_urls_on_the_target_site_are_loaded() {
+        let mut odd = assignment(1, 5, 5.0);
+        odd.target = "https://example.com/shop/".into();
+        odd.paths = vec![
+            "/about".into(),
+            // Joined like links, these would lead to other hosts.
+            "//about".into(),
+            "//cdn.other.net/x".into(),
+            "https://other.example/".into(),
+            "http://example.com/plain".into(),
+        ];
+        let plan = Plan::new(&odd).unwrap();
+        let urls: Vec<&str> = plan.urls.iter().map(Url::as_str).collect();
+        assert_eq!(urls, ["https://example.com/about"]);
+    }
+
+    #[test]
+    fn a_batch_is_resent_unchanged_and_stats_keep_their_run() {
+        let shared = shared();
+        let record = |n| (0..n).for_each(|_| shared.stats.lock().unwrap().record(5.0, 0, None));
+        let mut outbox = Outbox::default();
+        assert!(outbox.next().is_none(), "nothing to send yet");
+
+        record(3);
+        outbox.collect(&shared, 7);
+        let first = outbox.next().unwrap();
+        assert_eq!((first.seq, first.run_id, first.delta.requests), (1, 7, 3));
+
+        // The sync fails. More requests finish, then the run ends (run id 0)
+        // and a few stragglers come in. The batch in flight must not change.
+        record(2);
+        outbox.collect(&shared, 7);
+        record(1);
+        outbox.collect(&shared, 7);
+        record(4);
+        outbox.collect(&shared, 0);
+        let again = outbox.next().unwrap();
+        assert_eq!((again.seq, again.run_id, again.delta.requests), (1, 7, 3));
+
+        // Delivered at last: the rest follows, still labelled with its run.
+        outbox.delivered();
+        let second = outbox.next().unwrap();
+        assert_eq!(
+            (second.seq, second.run_id, second.delta.requests),
+            (2, 7, 3)
+        );
+        outbox.delivered();
+        let third = outbox.next().unwrap();
+        assert_eq!((third.seq, third.run_id, third.delta.requests), (3, 0, 4));
+        outbox.delivered();
+        assert!(outbox.next().is_none());
+
+        record(1);
+        outbox.collect(&shared, 8);
+        outbox.clear();
+        assert!(outbox.next().is_none());
     }
 
     #[tokio::test]
@@ -693,6 +848,154 @@ mod tests {
             "the worker kept running a run the coordinator no longer has"
         );
         worker.abort();
+    }
+
+    /// How the coordinator of the tests below treats requests.
+    const UP: u8 = 0;
+    /// Answers 503 without looking at the request.
+    const REFUSING: u8 = 1;
+    /// Handles the request, then loses the answer: the worker sees a failure.
+    const MUTE: u8 = 2;
+    /// Takes the request and never answers.
+    const HUNG: u8 = 3;
+
+    /// A coordinator, a site and a worker running a fast five-user run, with
+    /// a switch for how the coordinator behaves.
+    struct Fleet {
+        state: coordinator::Shared,
+        mode: Arc<AtomicU8>,
+        hits: Arc<AtomicU64>,
+        worker: JoinHandle<Result<()>>,
+        _servers: (TestServer, TestServer),
+    }
+
+    impl Fleet {
+        async fn running() -> Self {
+            let (site, hits) = target().await;
+            let state: coordinator::Shared = Arc::new(Mutex::new(Coordinator::new(
+                "secret".into(),
+                site.url("/"),
+                vec!["/".into()],
+            )));
+            let mode = Arc::new(AtomicU8::new(UP));
+            let switch = mode.clone();
+            let router = coordinator::router(state.clone()).layer(middleware::from_fn(
+                move |request: Request, next: Next| {
+                    let mode = switch.load(Ordering::Relaxed);
+                    async move {
+                        match mode {
+                            REFUSING => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                            MUTE => {
+                                next.run(request).await;
+                                StatusCode::SERVICE_UNAVAILABLE.into_response()
+                            }
+                            HUNG => std::future::pending().await,
+                            _ => next.run(request).await,
+                        }
+                    }
+                },
+            ));
+            let coord = TestServer::start(router).await;
+            let worker = tokio::spawn(run(options(&coord, "secret")));
+
+            until("the worker to register", || worker_count(&state) == 1).await;
+            state.lock().unwrap().start(fast_run(5));
+            until("load on the target", || hits.load(Ordering::Relaxed) > 20).await;
+            Self {
+                state,
+                mode,
+                hits,
+                worker,
+                _servers: (site, coord),
+            }
+        }
+
+        fn set(&self, mode: u8) {
+            self.mode.store(mode, Ordering::Relaxed);
+        }
+
+        fn hits(&self) -> u64 {
+            self.hits.load(Ordering::Relaxed)
+        }
+
+        /// Requests the coordinator has counted for the run.
+        fn recorded(&self) -> u64 {
+            let status = self.state.lock().unwrap().status();
+            status["run"]["requests"].as_u64().unwrap()
+        }
+
+        /// End the run with the coordinator back to normal, and wait for the
+        /// worker's remaining stats. Returns `(requests the site received,
+        /// requests the run recorded)`.
+        async fn settle(&self) -> (u64, u64) {
+            self.state.lock().unwrap().stop();
+            self.set(UP);
+            assert!(goes_quiet(&self.hits, Duration::from_secs(20)).await);
+            // A request that was in flight when its user was stopped reached
+            // the site without being recorded: at most one per user, per stop.
+            let unrecorded = 2 * 5;
+            until("the worker's last stats", || {
+                self.hits().saturating_sub(self.recorded()) <= unrecorded
+            })
+            .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            (self.hits(), self.recorded())
+        }
+    }
+
+    impl Drop for Fleet {
+        fn drop(&mut self) {
+            self.worker.abort();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stats_from_an_outage_longer_than_the_cut_off_still_reach_the_run() {
+        let fleet = Fleet::running().await;
+        fleet.set(REFUSING);
+        // Long enough for the worker to give up and stop its users.
+        assert!(goes_quiet(&fleet.hits, Duration::from_secs(20)).await);
+
+        let (hits, recorded) = fleet.settle().await;
+        assert!(recorded <= hits, "recorded {recorded} of {hits} requests");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn answers_lost_on_the_way_back_do_not_count_stats_twice() {
+        let fleet = Fleet::running().await;
+        // Every sync now reaches the coordinator and is applied, yet looks
+        // failed to the worker, which sends the same stats again.
+        fleet.set(MUTE);
+        assert!(goes_quiet(&fleet.hits, Duration::from_secs(20)).await);
+
+        let (hits, recorded) = fleet.settle().await;
+        assert!(
+            recorded <= hits,
+            "the run recorded {recorded} requests but the site only received {hits}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cut_off_does_not_wait_for_a_sync_that_hangs() {
+        let fleet = Fleet::running().await;
+        fleet.set(HUNG);
+        let hung_at = Instant::now();
+
+        // Note when the site receives its last request.
+        let mut last = (fleet.hits(), Instant::now());
+        while hung_at.elapsed() < Duration::from_secs(7) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if fleet.hits() != last.0 {
+                last = (fleet.hits(), Instant::now());
+            }
+        }
+        // The cut-off is 1.5 s in these tests. Were it only checked between
+        // calls, the load would go on until the hung call's own 5 s timeout.
+        let went_on_for = last.1.duration_since(hung_at);
+        assert!(
+            went_on_for < Duration::from_millis(3500),
+            "the load went on for {went_on_for:?} after the coordinator hung"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

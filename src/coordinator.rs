@@ -38,6 +38,8 @@ struct Worker {
     active_users: u32,
     rps: f64,
     totals: Stats,
+    /// Highest numbered stats batch applied so far (see `SyncRequest::seq`).
+    last_seq: u64,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, Default)]
@@ -136,22 +138,29 @@ impl Coordinator {
         };
         let alloc = self.allocation();
         let users = alloc.get(worker_id).copied().unwrap_or(0);
-        let allocated: u64 = alloc.values().map(|n| *n as u64).sum();
-        let share = if allocated == 0 {
+        // The spawn rate is fleet-wide. Split it by how many users each device
+        // still has to start, so that the fleet as a whole adds exactly the
+        // rate that was asked for: during the ramp every device gets a share
+        // in proportion to its allocation and all finish together, and a
+        // device that later needs more (a phone whose auto-tune raised its
+        // capacity) gets the rate the others no longer use.
+        let missing = |w: &Worker| {
+            let assigned = alloc.get(&w.id).copied().unwrap_or(0);
+            u64::from(assigned.saturating_sub(w.active_users))
+        };
+        let fleet_missing: u64 = self.alive().map(missing).sum();
+        let mine = self.workers.get(worker_id).map_or(0, missing);
+        let share = if fleet_missing == 0 {
             0.0
         } else {
-            users as f64 / allocated as f64
+            mine as f64 / fleet_missing as f64
         };
         Assignment {
             run_id: run.id,
             target: self.target.clone(),
             paths: self.paths.clone(),
             users,
-            // Its share of the fleet-wide spawn rate, so the fleet as a whole
-            // ramps at the rate that was asked for and every device finishes
-            // ramping at the same moment. The floor of one user per second
-            // only keeps a device with a tiny share from crawling.
-            spawn_per_sec: (run.config.spawn_rate * share).max(1.0),
+            spawn_per_sec: run.config.spawn_rate * share,
             wait_min_ms: run.config.wait_min_ms,
             wait_max_ms: run.config.wait_max_ms.max(run.config.wait_min_ms),
             timeout_ms: run.config.timeout_ms,
@@ -184,6 +193,7 @@ impl Coordinator {
                 active_users: 0,
                 rps: 0.0,
                 totals: Stats::default(),
+                last_seq: 0,
             },
         );
         RegisterResponse {
@@ -204,6 +214,14 @@ impl Coordinator {
         if let Some(cap) = req.capacity.filter(|c| *c > 0) {
             w.capacity = cap;
         }
+        // A numbered batch that was already applied is the retry of a sync that
+        // did arrive and whose answer got lost. Counting it again would
+        // inflate every total a little more with each lost answer.
+        let repeated = req.seq != 0 && req.seq <= w.last_seq;
+        if repeated {
+            return Some(self.assignment_for(&req.worker_id));
+        }
+        w.last_seq = w.last_seq.max(req.seq);
         w.rps = req.delta.requests as f64 / dt;
         w.totals.merge(&req.delta);
 
@@ -596,6 +614,7 @@ mod tests {
                 run_id,
                 active_users: 0,
                 delta,
+                seq: 0,
                 capacity: None,
             })
             .unwrap()
@@ -626,6 +645,7 @@ mod tests {
                 run_id: 0,
                 active_users: 0,
                 delta: Stats::default(),
+                seq: 0,
                 capacity: None
             })
             .is_none());
@@ -666,6 +686,7 @@ mod tests {
                 run_id: 1,
                 active_users: 0,
                 delta: Stats::default(),
+                seq: 0,
                 capacity,
             })
             .unwrap()
@@ -713,11 +734,25 @@ mod tests {
     }
 
     fn report(c: &mut Coordinator, id: &str, run_id: u64, delta: Stats) -> Assignment {
+        report_as(c, id, run_id, 0, 0, delta)
+    }
+
+    /// A sync from a worker that has `active` users running, carrying stats
+    /// batch number `seq`.
+    fn report_as(
+        c: &mut Coordinator,
+        id: &str,
+        run_id: u64,
+        active: u32,
+        seq: u64,
+        delta: Stats,
+    ) -> Assignment {
         c.sync(SyncRequest {
             worker_id: id.into(),
             run_id,
-            active_users: 0,
+            active_users: active,
             delta,
+            seq,
             capacity: None,
         })
         .unwrap()
@@ -745,13 +780,66 @@ mod tests {
     }
 
     #[test]
-    fn a_device_with_a_tiny_share_still_ramps() {
+    fn many_small_devices_do_not_push_the_fleet_past_the_spawn_rate() {
+        let mut c = coordinator();
+        let phones: Vec<String> = (0..30)
+            .map(|_| join(&mut c, WorkerKind::Browser, 10))
+            .collect();
+        let run = c.start(run_with(300, 5.0));
+        let fleet_rate: f64 = phones
+            .iter()
+            .map(|phone| report(&mut c, phone, run, Stats::default()).spawn_per_sec)
+            .sum();
+        // 5 per second for the whole fleet, not 5 (or 1) per phone.
+        assert!((fleet_rate - 5.0).abs() < 1e-9, "fleet rate {fleet_rate}");
+    }
+
+    #[test]
+    fn a_device_that_needs_users_gets_the_rate_the_others_no_longer_use() {
         let mut c = coordinator();
         let phone = join(&mut c, WorkerKind::Browser, 6);
-        join(&mut c, WorkerKind::Native, 100_000);
+        let laptop = join(&mut c, WorkerKind::Native, 100_000);
         let run = c.start(run_with(10_000, 50.0));
-        let a = report(&mut c, &phone, run, Stats::default());
-        assert_eq!((a.users, a.spawn_per_sec), (6, 1.0));
+
+        // While both are ramping, the phone's share is as small as its allocation.
+        let ramping = report(&mut c, &phone, run, Stats::default());
+        assert_eq!(ramping.users, 6);
+        assert!((ramping.spawn_per_sec - 50.0 * 6.0 / 10_000.0).abs() < 1e-9);
+
+        // Once the laptop runs everything it was given, the phone has the whole rate.
+        let laptop_users = report(&mut c, &laptop, run, Stats::default()).users;
+        report_as(&mut c, &laptop, run, laptop_users, 0, Stats::default());
+        assert_eq!(
+            report(&mut c, &phone, run, Stats::default()).spawn_per_sec,
+            50.0
+        );
+
+        // And a device that is full is told to add nobody.
+        assert_eq!(
+            report_as(&mut c, &phone, run, 6, 0, Stats::default()).spawn_per_sec,
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_stats_batch_sent_twice_is_counted_once() {
+        let mut c = coordinator();
+        let w = join(&mut c, WorkerKind::Native, 100);
+        let run = c.start(run_with(10, 10.0));
+        let requests = |c: &Coordinator| c.run.as_ref().unwrap().stats.requests;
+
+        report_as(&mut c, &w, run, 0, 1, sent(7, 20.0));
+        // The answer got lost, so the worker sends batch 1 again.
+        report_as(&mut c, &w, run, 0, 1, sent(7, 20.0));
+        assert_eq!(requests(&c), 7);
+        report_as(&mut c, &w, run, 0, 2, sent(7, 20.0));
+        assert_eq!(requests(&c), 14);
+        assert_eq!(c.workers[&w].totals.requests, 14);
+
+        // Batches without a number, from a worker that does not number them, all count.
+        report_as(&mut c, &w, run, 0, 0, sent(7, 20.0));
+        report_as(&mut c, &w, run, 0, 0, sent(7, 20.0));
+        assert_eq!(requests(&c), 28);
     }
 
     #[test]
@@ -765,7 +853,9 @@ mod tests {
 
         // Ten seconds in, with one request in the last five reported seconds.
         let r = c.run.as_mut().unwrap();
-        r.started = Instant::now() - Duration::from_secs(10);
+        r.started = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("the clock goes back ten seconds");
         r.per_sec = (5..10)
             .map(|sec| (sec, sent(u64::from(sec == 7), 20.0)))
             .collect();

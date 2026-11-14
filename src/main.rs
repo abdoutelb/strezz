@@ -10,7 +10,7 @@ mod worker;
 #[cfg(test)]
 mod testutil;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rand::RngExt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -41,8 +41,8 @@ enum Cmd {
         name: Option<String>,
         /// Concurrent users this worker offers (default: 1000 per CPU core,
         /// at most 16000). The open-file limit is the ceiling either way.
-        #[arg(long, env = "STREZZ_MAX_USERS")]
-        max_users: Option<u32>,
+        #[arg(long, env = "STREZZ_MAX_USERS", value_parser = max_users)]
+        max_users: Option<MaxUsers>,
     },
     /// Legacy mode: crawl the target and write a Locust file (what strezz 0.1 did).
     Locustfile {
@@ -69,8 +69,8 @@ struct CoordinatorArgs {
     no_local_worker: bool,
     /// Concurrent users the coordinator's own worker offers (default: 1000
     /// per CPU core, at most 16000).
-    #[arg(long, env = "STREZZ_MAX_USERS")]
-    max_users: Option<u32>,
+    #[arg(long, env = "STREZZ_MAX_USERS", value_parser = max_users)]
+    max_users: Option<MaxUsers>,
     /// Extra paths to hit besides the crawled ones (repeatable).
     #[arg(long = "path")]
     extra_paths: Vec<String>,
@@ -99,6 +99,42 @@ fn http_url(s: &str) -> Result<Url, String> {
         return Err(hint.into());
     }
     Ok(url)
+}
+
+/// `--max-users` / `STREZZ_MAX_USERS`: a number, or nothing for "the default".
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MaxUsers(Option<u32>);
+
+/// An empty value counts as not set, like an empty token: a blank
+/// `STREZZ_MAX_USERS=` line in `.env` should not stop the program.
+fn max_users(s: &str) -> Result<MaxUsers, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(MaxUsers(None));
+    }
+    s.parse()
+        .map(|n| MaxUsers(Some(n)))
+        .map_err(|_| format!("expected a whole number of users, got '{s}'"))
+}
+
+/// After a crawl of `asked` ended at `landed`: the address to test, which is
+/// `landed` when a redirect stayed on the site (http -> https, apex -> www).
+///
+/// A redirect to a different site is refused. The fleet would otherwise load
+/// an address nobody named, a third-party login page for instance, and a
+/// warning on a terminal that nobody is watching does not prevent that.
+fn after_redirect(asked: &Url, landed: Url) -> Result<Url> {
+    if landed.origin() == asked.origin() {
+        return Ok(asked.clone());
+    }
+    if !crawl::same_site(asked, &landed) {
+        bail!(
+            "{asked} redirects to {landed}, which is a different site.\n\
+             Strezz only loads the site you name. If that address is the one to test, pass it as --url."
+        );
+    }
+    println!("note: {asked} redirects to {landed}; testing that address");
+    Ok(landed)
 }
 
 fn hostname() -> String {
@@ -158,21 +194,14 @@ fn local_url(listening_on: SocketAddr) -> Result<Url> {
 }
 
 /// Decide what to test: the address (which a redirect may change) and the paths.
-async fn plan_target(args: &CoordinatorArgs) -> (Url, Vec<String>) {
+async fn plan_target(args: &CoordinatorArgs) -> Result<(Url, Vec<String>)> {
     let mut target = args.url.clone();
     let crawled = if args.no_crawl {
         vec!["/".to_string()]
     } else {
         match crawl::discover_paths(&args.url).await {
             Ok(crawl) => {
-                if crawl.final_url.origin() != args.url.origin() {
-                    eprintln!(
-                        "warning: {} redirects to {}\n         \
-                         The test will load that address. Stop now if it is not a site you may test.",
-                        args.url, crawl.final_url
-                    );
-                    target = crawl.final_url;
-                }
+                target = after_redirect(&args.url, crawl.final_url)?;
                 crawl.paths
             }
             Err(e) => {
@@ -185,18 +214,27 @@ async fn plan_target(args: &CoordinatorArgs) -> (Url, Vec<String>) {
         }
     };
     let mut paths = crawl::exclude(crawled, &args.exclude);
-    paths.extend(args.extra_paths.iter().cloned());
+    for path in &args.extra_paths {
+        if crawl::stays_on_site(&target, path) {
+            paths.push(path.clone());
+        } else {
+            eprintln!(
+                "warning: skipping --path {path}: it does not lead to {}",
+                target.origin().ascii_serialization()
+            );
+        }
+    }
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
         eprintln!("warning: --exclude left no paths; testing / only");
         paths.push("/".to_string());
     }
-    (target, paths)
+    Ok((target, paths))
 }
 
 async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
-    let (target, paths) = plan_target(&args).await;
+    let (target, paths) = plan_target(&args).await?;
     println!("target {target}: {} paths", paths.len());
 
     // An empty token (a blank `STREZZ_TOKEN=` line in .env, say) would be no
@@ -280,7 +318,7 @@ async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
             coordinator: local_url(local)?,
             token,
             name: format!("{} (coordinator)", hostname()),
-            max_users: args.max_users,
+            max_users: args.max_users.and_then(|m| m.0),
             lost_after: worker::LOST_AFTER,
         };
         tokio::spawn(async move {
@@ -307,13 +345,15 @@ async fn main() -> Result<()> {
                 coordinator,
                 token,
                 name: name.unwrap_or_else(hostname),
-                max_users,
+                max_users: max_users.and_then(|m| m.0),
                 lost_after: worker::LOST_AFTER,
             })
             .await?;
         }
         Cmd::Locustfile { url, output } => {
-            let paths = crawl::discover_paths(&url).await?.paths;
+            let crawl = crawl::discover_paths(&url).await?;
+            after_redirect(&url, crawl.final_url)?;
+            let paths = crawl.paths;
             std::fs::write(&output, locust::generate_locustfile(&paths))?;
             println!("wrote {} tasks to {}", paths.len(), output.display());
         }
@@ -340,6 +380,35 @@ mod tests {
         assert!(http_url("192.168.1.4:4000").is_err());
         assert!(http_url("ftp://example.com/").is_err());
         assert!(http_url("your-site.example").is_err());
+    }
+
+    #[test]
+    fn an_empty_max_users_means_the_default() {
+        assert_eq!(max_users(""), Ok(MaxUsers(None)));
+        assert_eq!(max_users("  "), Ok(MaxUsers(None)));
+        assert_eq!(max_users("2000"), Ok(MaxUsers(Some(2000))));
+        assert!(max_users("lots").is_err());
+        assert!(max_users("-5").is_err());
+    }
+
+    #[test]
+    fn a_redirect_is_followed_within_the_site_and_refused_beyond_it() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let asked = url("http://example.com/");
+        // No redirect, or one that stays on the same origin: test what was asked for.
+        assert_eq!(
+            after_redirect(&asked, url("http://example.com/en/")).unwrap(),
+            asked
+        );
+        // http -> https and apex -> www: test where it landed.
+        let landed = url("https://www.example.com/");
+        assert_eq!(after_redirect(&asked, landed.clone()).unwrap(), landed);
+        // Another site: refuse, and say how to test it on purpose.
+        let refusal = after_redirect(&asked, url("https://sso.other.net/login")).unwrap_err();
+        assert!(
+            refusal.to_string().contains("pass it as --url"),
+            "{refusal}"
+        );
     }
 
     #[test]

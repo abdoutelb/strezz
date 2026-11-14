@@ -120,6 +120,9 @@ const token = new URLSearchParams(location.search).get("token") || "";
 const $ = (id) => document.getElementById(id);
 const H = { "content-type": "application/json", "x-strezz-token": token };
 const fmt = (n) => Math.round(n).toLocaleString();
+// Requests per second. Rounded once they are big enough to round; below that the decimals
+// are the information, and a test doing one request every four seconds must not read as 0.
+const rate = (v) => v >= 10 ? fmt(v) : v >= 1 ? v.toFixed(1) : v > 0 ? v.toFixed(2) : "0";
 const ms = (v) => v ? (v < 1000 ? Math.round(v) + " ms" : (v / 1000).toFixed(2) + " s") : "–";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Quote for a POSIX shell unless plainly safe as it stands (same rule as shell_quote in src/main.rs).
@@ -203,7 +206,7 @@ async function refresh() {
   const run = s.run;
   if (run) {
     $("t-users").textContent = fmt(run.active_users);
-    $("t-rps").textContent = fmt(run.rps);
+    $("t-rps").textContent = rate(run.rps);
     $("t-fail").textContent = run.requests ? (100 * run.failures / run.requests).toFixed(1) + "%" : "0%";
     $("t-p50").textContent = ms(run.p50_ms); $("t-p95").textContent = ms(run.p95_ms); $("t-p99").textContent = ms(run.p99_ms);
     $("t-total").textContent = fmt(run.requests); $("t-elapsed").textContent = run.elapsed_secs + "s";
@@ -224,7 +227,7 @@ async function refresh() {
     const pct = w.capacity ? Math.min(100, 100 * w.active_users / w.capacity) : 0;
     return `<tr><td><span class="dot ${w.alive ? "" : "off"}"></span>${esc(w.name)}</td><td>${w.kind}</td>
       <td class="n">${fmt(w.capacity)}</td><td><div class="bar"><div style="width:${pct}%"></div></div></td>
-      <td class="n">${fmt(w.active_users)} / ${fmt(w.assigned)}</td><td class="n">${fmt(w.rps)}</td>
+      <td class="n">${fmt(w.active_users)} / ${fmt(w.assigned)}</td><td class="n">${rate(w.rps)}</td>
       <td class="n">${fmt(w.requests)}</td><td class="n">${fmt(w.failures)}</td></tr>`;
   }).join("") : '<tr><td colspan="8" class="muted">No devices yet</td></tr>';
 }
