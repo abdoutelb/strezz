@@ -20,7 +20,10 @@ pub fn raise_fd_limit() -> u64 {
             if want <= lim.rlim_cur || want > hard {
                 continue;
             }
-            let attempt = libc::rlimit { rlim_cur: want, rlim_max: hard };
+            let attempt = libc::rlimit {
+                rlim_cur: want,
+                rlim_max: hard,
+            };
             if libc::setrlimit(libc::RLIMIT_NOFILE, &attempt) == 0 {
                 lim.rlim_cur = want;
                 break;
@@ -36,9 +39,19 @@ fn os_max_files() -> libc::rlim_t {
     let mut len = std::mem::size_of::<libc::c_int>();
     let name = c"kern.maxfilesperproc";
     let ok = unsafe {
-        libc::sysctlbyname(name.as_ptr(), &mut v as *mut _ as *mut libc::c_void, &mut len, std::ptr::null_mut(), 0)
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut v as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
     } == 0;
-    if ok && v > 0 { v as libc::rlim_t } else { 10_240 }
+    if ok && v > 0 {
+        v as libc::rlim_t
+    } else {
+        10_240
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -57,7 +70,9 @@ pub fn raise_fd_limit() -> u64 {
 
 /// Concurrent virtual users (one connection each) a worker can safely hold.
 pub fn capacity_from_fd_limit(soft_limit: u64) -> u32 {
-    soft_limit.saturating_sub(RESERVED_FDS).clamp(1, u32::MAX as u64) as u32
+    soft_limit
+        .saturating_sub(RESERVED_FDS)
+        .clamp(1, u32::MAX as u64) as u32
 }
 
 #[cfg(test)]
@@ -75,6 +90,9 @@ mod tests {
         let raised = raise_fd_limit();
         assert!(raised >= 256, "raised={raised}");
         #[cfg(unix)]
-        assert!(raised <= os_max_files() as u64, "raised={raised} beyond kernel max");
+        assert!(
+            raised <= os_max_files() as u64,
+            "raised={raised} beyond kernel max"
+        );
     }
 }

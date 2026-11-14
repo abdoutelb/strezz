@@ -6,8 +6,29 @@ use std::net::{IpAddr, Ipv4Addr};
 
 /// Interface name prefixes that never lead to the physical LAN.
 const VIRTUAL_IFACES: &[&str] = &[
-    "lo", "docker", "br-", "veth", "virbr", "vbox", "vmnet", "utun", "tun", "tap", "awdl", "llw",
-    "bridge", "anpi", "ap1", "gif", "stf", "zt", "tailscale", "wg", "cni", "flannel", "kube",
+    "lo",
+    "docker",
+    "br-",
+    "veth",
+    "virbr",
+    "vbox",
+    "vmnet",
+    "utun",
+    "tun",
+    "tap",
+    "awdl",
+    "llw",
+    "bridge",
+    "anpi",
+    "ap1",
+    "gif",
+    "stf",
+    "zt",
+    "tailscale",
+    "wg",
+    "cni",
+    "flannel",
+    "kube",
 ];
 
 /// Interface name prefixes of typical Wi-Fi/Ethernet adapters.
@@ -28,12 +49,15 @@ fn score(name: &str, ip: &Ipv4Addr) -> Option<u8> {
     // Docker's default bridge range, even when the interface name is unusual.
     let docker_range = ip.octets()[0] == 172 && (17..=31).contains(&ip.octets()[1]);
     let lan_name = LAN_IFACES.iter().any(|p| name.starts_with(p));
-    Some(match (is_private(ip) && !docker_range, lan_name) {
-        (true, true) => 0,
-        (true, false) => 1,
-        (false, true) => 2, // a public IP directly on the NIC
-        (false, false) => 3,
-    } * 2 + u8::from(docker_range))
+    Some(
+        match (is_private(ip) && !docker_range, lan_name) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2, // a public IP directly on the NIC
+            (false, false) => 3,
+        } * 2
+            + u8::from(docker_range),
+    )
 }
 
 /// Rank `(interface, ip)` pairs, best first, dropping unusable ones.
@@ -87,7 +111,9 @@ mod tests {
         ];
         let ranked = rank(&ifaces);
         assert_eq!(ranked[0], "192.168.1.4".parse::<Ipv4Addr>().unwrap());
-        assert!(!ranked.iter().any(|ip| ip.is_loopback() || ip.is_link_local()));
+        assert!(!ranked
+            .iter()
+            .any(|ip| ip.is_loopback() || ip.is_link_local()));
         assert!(!ranked.contains(&"172.17.0.1".parse().unwrap()));
         assert!(!ranked.contains(&"10.8.0.2".parse().unwrap()));
     }

@@ -52,7 +52,10 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
     let api = |path: &str| opts.coordinator.join(path).expect("valid api path");
     let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-    let shared = Arc::new(Shared { stats: Mutex::new(Stats::default()), active: AtomicU32::new(0) });
+    let shared = Arc::new(Shared {
+        stats: Mutex::new(Stats::default()),
+        active: AtomicU32::new(0),
+    });
     let mut users: Vec<User> = Vec::new();
     let mut current = Assignment::idle();
     let mut worker_id: Option<String> = None;
@@ -71,7 +74,9 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
                     capacity,
                     platform: platform.clone(),
                 };
-                match post::<_, RegisterResponse>(&control, api("api/register"), &opts.token, &req).await {
+                match post::<_, RegisterResponse>(&control, api("api/register"), &opts.token, &req)
+                    .await
+                {
                     Ok(resp) => {
                         println!("registered with {} as {}", opts.coordinator, resp.worker_id);
                         backoff = Duration::from_millis(500);
@@ -114,7 +119,10 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
             users.clear();
             spawn_budget = 0.0;
             if next.run_id != 0 {
-                println!("run {}: {} users against {}", next.run_id, next.users, next.target);
+                println!(
+                    "run {}: {} users against {}",
+                    next.run_id, next.users, next.target
+                );
             } else {
                 println!("idle");
             }
@@ -132,7 +140,8 @@ pub async fn run(opts: WorkerOptions) -> Result<()> {
             let plan = Arc::new(next.clone());
             let target = Url::parse(&next.target).context("bad target url from coordinator")?;
             for _ in 0..add {
-                let handle = tokio::spawn(virtual_user(target.clone(), plan.clone(), shared.clone()));
+                let handle =
+                    tokio::spawn(virtual_user(target.clone(), plan.clone(), shared.clone()));
                 users.push(User(handle));
             }
         }
@@ -147,10 +156,19 @@ async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     token: &str,
     body: &T,
 ) -> Result<R> {
-    let resp = client.post(url).header(TOKEN_HEADER, token).json(body).send().await?;
+    let resp = client
+        .post(url)
+        .header(TOKEN_HEADER, token)
+        .json(body)
+        .send()
+        .await?;
     let status = resp.status();
     if !status.is_success() {
-        bail!("{} {}", status.as_u16(), resp.text().await.unwrap_or_default());
+        bail!(
+            "{} {}",
+            status.as_u16(),
+            resp.text().await.unwrap_or_default()
+        );
     }
     Ok(resp.json().await?)
 }
@@ -176,11 +194,19 @@ async fn virtual_user(target: Url, plan: Arc<Assignment>, shared: Arc<Shared>) {
     {
         Ok(c) => c,
         Err(e) => {
-            shared.stats.lock().unwrap().record(0.0, 0, Some(format!("client: {e}")));
+            shared
+                .stats
+                .lock()
+                .unwrap()
+                .record(0.0, 0, Some(format!("client: {e}")));
             return;
         }
     };
-    let paths: Vec<Url> = plan.paths.iter().filter_map(|p| target.join(p).ok()).collect();
+    let paths: Vec<Url> = plan
+        .paths
+        .iter()
+        .filter_map(|p| target.join(p).ok())
+        .collect();
     if paths.is_empty() {
         return;
     }

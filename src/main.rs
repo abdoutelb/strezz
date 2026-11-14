@@ -77,7 +77,14 @@ fn hostname() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Coordinator { url, listen, token, no_local_worker, extra_paths, public_url } => {
+        Cmd::Coordinator {
+            url,
+            listen,
+            token,
+            no_local_worker,
+            extra_paths,
+            public_url,
+        } => {
             let mut paths = match crawl::discover_paths(&url).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -92,7 +99,9 @@ async fn main() -> Result<()> {
 
             let token = token.unwrap_or_else(|| {
                 let mut rng = rand::thread_rng();
-                (0..12).map(|_| format!("{:x}", rng.gen::<u8>() % 16)).collect()
+                (0..12)
+                    .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
+                    .collect()
             });
             let state = Arc::new(Mutex::new(coordinator::Coordinator::new(
                 token.clone(),
@@ -110,7 +119,10 @@ async fn main() -> Result<()> {
                 .collect();
             let base = match &public_url {
                 Some(u) => u.as_str().trim_end_matches('/').to_string(),
-                None => detected.first().cloned().unwrap_or_else(|| format!("http://127.0.0.1:{port}")),
+                None => detected
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| format!("http://127.0.0.1:{port}")),
             };
             if listen.ip().is_loopback() {
                 eprintln!("warning: listening on {listen} only; use --listen 0.0.0.0:{port} so phones can connect");
@@ -121,7 +133,9 @@ async fn main() -> Result<()> {
                      Set STREZZ_PUBLIC_URL=http://<your-computer-LAN-IP>:{port} (or use host networking)."
                 );
             } else if public_url.is_none() && detected.is_empty() {
-                eprintln!("warning: no LAN address found; connect to Wi-Fi/Ethernet or pass --public-url");
+                eprintln!(
+                    "warning: no LAN address found; connect to Wi-Fi/Ethernet or pass --public-url"
+                );
             }
             let join = format!("{base}/join?token={token}");
             {
@@ -137,10 +151,18 @@ async fn main() -> Result<()> {
             println!("  phones      {join}");
             println!("  machines    strezz worker --coordinator {base} --token {token}\n");
             if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
-                println!("{}", qr.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build());
+                println!(
+                    "{}",
+                    qr.render::<qrcode::render::unicode::Dense1x2>()
+                        .quiet_zone(true)
+                        .build()
+                );
             }
             if detected.len() > 1 && public_url.is_none() {
-                println!("  other addresses of this machine: {}", detected[1..].join(", "));
+                println!(
+                    "  other addresses of this machine: {}",
+                    detected[1..].join(", ")
+                );
             }
             println!("  phones must be on the same Wi-Fi; allow incoming connections if the firewall asks.\n");
 
@@ -160,7 +182,12 @@ async fn main() -> Result<()> {
             }
             axum::serve(listener, coordinator::router(state)).await?;
         }
-        Cmd::Worker { coordinator, token, name, max_users } => {
+        Cmd::Worker {
+            coordinator,
+            token,
+            name,
+            max_users,
+        } => {
             worker::run(worker::WorkerOptions {
                 coordinator,
                 token,

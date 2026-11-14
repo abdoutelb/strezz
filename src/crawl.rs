@@ -34,11 +34,15 @@ pub fn extract_paths(html: &str, base: &Url) -> Vec<String> {
     paths.insert("/".to_string());
 
     for a in doc.select(&anchors) {
-        let Some(href) = a.value().attr("href").map(str::trim) else { continue };
+        let Some(href) = a.value().attr("href").map(str::trim) else {
+            continue;
+        };
         if href.is_empty() || href.starts_with('#') {
             continue;
         }
-        let Ok(mut url) = base.join(href) else { continue };
+        let Ok(mut url) = base.join(href) else {
+            continue;
+        };
         if url.origin() != base.origin() {
             continue;
         }
