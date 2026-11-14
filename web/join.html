@@ -27,6 +27,7 @@
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { font-size:13px; padding:3px 9px; border-radius:8px; background:var(--bg); border:1px solid var(--line); }
   #tune { margin-top:10px; font-size:14px; }
+  #awake { margin-top:10px; }
   #tune.up { color:var(--ok); } #tune.down { color:var(--warn); }
 </style>
 </head>
@@ -46,6 +47,7 @@
       <div class="stat"><b id="sent">0</b><span>requests sent</span></div>
       <div class="stat"><b id="fails">0</b><span>failures</span></div>
     </div>
+    <div id="awake" class="muted"></div>
   </div>
 
   <div class="card">
@@ -62,15 +64,21 @@
   </div>
 
   <div class="card muted" style="font-size:13px">
-    The starting value comes from this device's CPU cores, memory and network. During a run, auto-tune
+    The starting value comes from this device's CPU cores and, where the browser reports them, its memory
+    and network. During a run, auto-tune
     keeps adding users while throughput keeps rising. It backs off when the browser starts lagging, when
     latency balloons (the browser is queueing connections), or when errors rise. Browsers can't read
     cross-origin responses, so only network failures and timeouts are counted, not HTTP error codes.
+    If this page loses the coordinator for 10 seconds it stops all its users by itself.
   </div>
 </main>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
 const BUCKETS = 64, MAX_CAP = 5000, WINDOW_MS = 5000;
+// Stop every user after this long without a successful sync. Without it, a coordinator that
+// crashes, is closed or drops off the network would leave this device loading the target
+// with nobody able to stop it. (The native worker has the same cut-off.)
+const LOST_MS = 10000, CONTROL_TIMEOUT_MS = 5000;
 const $ = (id) => document.getElementById(id);
 const bucketFor = (ms) => Math.min(BUCKETS - 1, Math.floor(Math.log2(Math.max(0, ms) + 1) * 4));
 const newDelta = () => ({ requests: 0, failures: 0, bytes: 0, latency_sum_ms: 0, hist: new Array(BUCKETS).fill(0), errors: {} });
@@ -102,8 +110,17 @@ let capacity = device.rec;
 $("capacity").value = capacity;
 
 // ---- state
-let joined = false, workerId = null, plan = { run_id: 0, users: 0 }, users = [], delta = newDelta();
-let spawnBudget = 0, lastTick = performance.now(), totals = { sent: 0, fails: 0 }, wakeLock = null, timer = null;
+// `session` changes on every join and leave. A tick remembers the session it was started
+// in and gives up as soon as that is no longer the current one.
+let joined = false, session = 0, workerId = null, plan = { run_id: 0, users: 0 }, users = [], delta = newDelta();
+let spawnBudget = 0, lastTick = performance.now(), lastContact = performance.now(), syncMs = 1000;
+let totals = { sent: 0, fails: 0 }, wakeLock = null, timer = null;
+// Stats travel to the coordinator in numbered batches. A batch whose sync failed is sent
+// again unchanged under the same number, and the coordinator applies each number once, so
+// a retry can neither lose stats nor count them twice. Every batch also names the run its
+// stats were collected in, which may be over by the time the batch gets through.
+// `sending` is the batch being delivered; `waiting` holds stats that have no number yet.
+let sending = null, waiting = [], lastSeq = 0;
 
 // ---- auto-tune measurements
 let win = newWindow(), baseline = null, prevRps = null, holds = 0, fullSince = null;
@@ -176,25 +193,32 @@ function record(ms, error) {
 }
 
 async function api(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-strezz-token": token }, body: JSON.stringify(body) });
-  if (!r.ok) { const e = new Error(r.status + " " + await r.text()); e.status = r.status; throw e; }
-  return r.json();
+  // Give up on a coordinator that has gone silent, or the tick waiting here would hang with it.
+  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), CONTROL_TIMEOUT_MS);
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-strezz-token": token }, body: JSON.stringify(body), signal: ctl.signal });
+    if (!r.ok) { const e = new Error(r.status + " " + await r.text()); e.status = r.status; throw e; }
+    return await r.json();
+  } finally { clearTimeout(to); }
 }
 
+// Resolves after `ms`, or at once when `signal` aborts. The listener is removed either way:
+// a user sleeps once per request, and listeners left behind would pile up on its signal.
 const sleep = (ms, signal) => new Promise((res) => {
-  const t = setTimeout(res, ms);
-  signal.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
+  if (signal.aborted) return res();
+  const done = () => { clearTimeout(t); signal.removeEventListener("abort", done); res(); };
+  const t = setTimeout(done, ms);
+  signal.addEventListener("abort", done, { once: true });
 });
 
-async function virtualUser(p, signal) {
-  const urls = p.paths.map((x) => new URL(x, p.target).href);
+async function virtualUser(p, urls, signal) {
   await sleep(Math.random() * Math.min(1000, p.wait_max_ms), signal);
   while (!signal.aborted) {
     const url = urls[Math.floor(Math.random() * urls.length)];
     const rc = new AbortController();
     const onStop = () => rc.abort();
     signal.addEventListener("abort", onStop, { once: true });
-    const to = setTimeout(() => rc.abort("timeout"), p.timeout_ms);
+    const to = setTimeout(() => rc.abort("timeout"), Math.max(100, p.timeout_ms));
     const t0 = performance.now();
     try {
       // no-cors: we can't read cross-origin responses, but the request is real load.
@@ -211,58 +235,130 @@ async function virtualUser(p, signal) {
 
 function stopUsers(n = 0) { while (users.length > n) users.pop().abort(); }
 
-async function tick() {
-  if (!joined) return;
+// Queue what the users recorded since the last call, as stats of run `runId`.
+function collect(runId) {
+  if (!delta.requests) return;
+  const last = waiting[waiting.length - 1];
+  if (last && last.run_id === runId) {
+    const into = last.delta;
+    into.requests += delta.requests; into.failures += delta.failures; into.bytes += delta.bytes;
+    into.latency_sum_ms += delta.latency_sum_ms;
+    delta.hist.forEach((n, i) => { into.hist[i] += n; });
+    for (const k in delta.errors) into.errors[k] = (into.errors[k] || 0) + delta.errors[k];
+  } else waiting.push({ run_id: runId, delta });
+  delta = newDelta();
+}
+
+// The batch to send with the next sync, if there are stats to send.
+function nextBatch() {
+  if (!sending && waiting.length) sending = { seq: ++lastSeq, ...waiting.shift() };
+  return sending;
+}
+
+// Drop every user and forget the run, so that the next assignment ramps up from zero.
+function stopRun() {
+  collect(plan.run_id);   // what the users did until now still belongs to their run
+  stopUsers(); spawnBudget = 0; plan = { run_id: 0, users: 0 };
+  baseline = prevRps = fullSince = null; holds = 0; win = newWindow();
+}
+
+const lost = () => performance.now() - lastContact > LOST_MS;
+const LOST_TEXT = "coordinator unreachable · load stopped";
+
+// The cut-off runs on its own timer rather than inside tick(), so it also fires while a
+// tick is still waiting for an answer.
+setInterval(() => {
+  if (!joined || !users.length || !lost()) return;
+  stopRun();
+  $("users").textContent = 0; $("state").textContent = LOST_TEXT; $("state").className = "pill";
+}, 1000);
+
+async function tick(mine) {
+  if (mine !== session) return;
   try {
     if (!workerId) {
       const name = (navigator.userAgentData?.platform || navigator.platform || "device") + " browser · " + device.cores + " cores";
       const r = await api("/api/register", { name, kind: "browser", capacity, platform: navigator.userAgent });
-      workerId = r.worker_id;
+      if (mine !== session) return;
+      workerId = r.worker_id; syncMs = clamp(r.sync_interval_ms || 1000, 100, 5000); lastContact = performance.now();
     }
     autoTune();
-    const sent = delta; delta = newDelta();
-    const next = await api("/api/sync", { worker_id: workerId, run_id: plan.run_id, active_users: users.length, delta: sent, capacity });
-    if (next.run_id !== plan.run_id) { stopUsers(); spawnBudget = 0; baseline = prevRps = fullSince = null; holds = 0; win = newWindow(); }
-    const now = performance.now(), dt = (now - lastTick) / 1000; lastTick = now;
+    collect(plan.run_id);
+    const batch = nextBatch();
+    const next = await api("/api/sync", {
+      worker_id: workerId, active_users: users.length, capacity,
+      run_id: batch ? batch.run_id : plan.run_id, seq: batch ? batch.seq : 0, delta: batch ? batch.delta : newDelta(),
+    });
+    // The coordinator has that batch now, whatever became of this session meanwhile.
+    if (batch && sending === batch) sending = null;
+    // "Leave fleet" may have been tapped while that request was in flight. This tick then
+    // belongs to a session that is over, and must not start users nobody will stop.
+    if (mine !== session) return;
+    lastContact = performance.now();
+    if (next.run_id !== plan.run_id) stopRun();
+    // After a gap, don't release in one burst the users the spawn rate "earned" meanwhile.
+    const now = performance.now(), dt = Math.min(now - lastTick, 3 * syncMs) / 1000; lastTick = now;
     const want = Math.min(next.users, capacity);
     if (users.length > want) stopUsers(want);
     else if (next.run_id && users.length < want) {
-      spawnBudget = Math.min(want, spawnBudget + Math.max(next.spawn_per_sec, 2) * dt);
+      spawnBudget = Math.min(want, spawnBudget + next.spawn_per_sec * dt);
       const add = Math.min(Math.floor(spawnBudget), want - users.length);
       spawnBudget -= add;
-      for (let i = 0; i < add; i++) { const c = new AbortController(); users.push(c); virtualUser(next, c.signal); }
+      // Only URLs on the target's own site. A path is resolved like a link on a page, so
+      // one starting with // or a whole URL would otherwise lead to another host.
+      const site = new URL(next.target).origin;
+      const urls = add ? next.paths.map((x) => new URL(x, next.target)).filter((u) => u.origin === site).map((u) => u.href) : [];
+      for (let i = 0; i < add && urls.length; i++) { const c = new AbortController(); users.push(c); virtualUser(next, urls, c.signal); }
     }
-    $("rps").textContent = Math.round(sent.requests / Math.max(dt, 0.001));
+    $("rps").textContent = Math.round((batch ? batch.delta.requests : 0) / Math.max(dt, 0.001));
     plan = next;
     $("state").textContent = next.run_id ? "running · run " + next.run_id : "joined · waiting for a run";
     $("state").className = "pill on";
     $("target").textContent = next.target ? new URL(next.target).host : "";
   } catch (e) {
-    if (e.status === 404) workerId = null;
-    $("state").textContent = e.status === 401 ? "bad token" : "reconnecting…";
+    if (mine !== session) return;
+    // A batch that was on its way stays in `sending` and goes out again with the next sync.
+    // A wrong token never becomes right: stop, instead of knocking every second.
+    if (e.status === 401) return leave("bad token · scan the QR code again");
+    // 404: the coordinator restarted. It no longer tracks the run this page was part of,
+    // and has no run for the stats that were waiting.
+    if (e.status === 404) { workerId = null; stopRun(); sending = null; waiting = []; }
+    $("state").textContent = lost() ? LOST_TEXT : "reconnecting…";
     $("state").className = "pill";
   }
   $("users").textContent = users.length;
   $("sent").textContent = totals.sent.toLocaleString();
   $("fails").textContent = totals.fails.toLocaleString();
-  timer = setTimeout(tick, 1000);
+  timer = setTimeout(() => tick(mine), syncMs);
 }
 
+// The Screen Wake Lock API only exists on HTTPS pages, and this page normally arrives over
+// plain http:// on the LAN. Say so instead of failing silently: a phone that locks its
+// screen stops generating load.
 async function keepAwake() {
-  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) {}
+  let lock = null;
+  try { lock = await navigator.wakeLock?.request("screen"); } catch (_) {}
+  if (!joined) { lock?.release?.(); return; }
+  wakeLock = lock || null;
+  $("awake").textContent = wakeLock
+    ? "The screen will stay on while this tab is open."
+    : "This browser can't keep the screen on for a page loaded over http://. Set the screen timeout (Auto-Lock) to Never while testing.";
 }
 document.addEventListener("visibilitychange", () => { if (joined && document.visibilityState === "visible") keepAwake(); });
 
+function leave(message) {
+  joined = false; session++; clearTimeout(timer); stopRun(); workerId = null;
+  wakeLock?.release?.(); wakeLock = null;
+  $("toggle").textContent = "Join fleet"; $("toggle").className = "";
+  $("state").textContent = message || "not joined"; $("state").className = "pill";
+  $("users").textContent = 0; $("awake").textContent = ""; setTune("");
+}
+
 $("toggle").onclick = () => {
-  joined = !joined;
-  if (joined) {
-    $("toggle").textContent = "Leave fleet"; $("toggle").className = "stop";
-    keepAwake(); lastTick = performance.now(); win = newWindow(); tick();
-  } else {
-    clearTimeout(timer); stopUsers(); workerId = null; plan = { run_id: 0, users: 0 };
-    wakeLock?.release(); $("toggle").textContent = "Join fleet"; $("toggle").className = "";
-    $("state").textContent = "not joined"; $("state").className = "pill"; setTune("");
-  }
+  if (joined) return leave();
+  joined = true; const mine = ++session;
+  $("toggle").textContent = "Leave fleet"; $("toggle").className = "stop";
+  keepAwake(); lastTick = lastContact = performance.now(); win = newWindow(); tick(mine);
 };
 if (!token) { $("state").textContent = "missing token in URL"; $("toggle").disabled = true; }
 </script>
