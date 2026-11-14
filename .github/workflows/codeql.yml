@@ -10,7 +10,7 @@ on:
 
 jobs:
   analyze:
-    name: Analyze
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -20,22 +20,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ rust ]
+        # Rust is the program; javascript-typescript covers the scripts inside
+        # web/*.html. Neither needs a build to be analyzed.
+        language: [ rust, javascript-typescript ]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+          build-mode: none
           queries: +security-and-quality
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
-
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"

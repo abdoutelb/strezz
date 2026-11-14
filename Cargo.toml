@@ -2,6 +2,8 @@
 name = "strezz"
 version = "0.2.0"
 edition = "2021"
+# The newest Rust any dependency in Cargo.lock asks for.
+rust-version = "1.88"
 authors = ["abdoutelb"]
 description = "Distributed website stress testing: turn every device on your network into a load generator"
 
