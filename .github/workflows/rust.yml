@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ master ]
 
+# The jobs only read the code. Without this they would run with the
+# repository's default token permissions, which include write access.
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -14,10 +19,21 @@ jobs:
         os: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # Formatting does not depend on the OS, so one runner checks it.
+      - if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  web:
+    name: browser worker page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Runs the script of web/join.html against a stubbed browser.
+      - run: node --test web/join.test.mjs

@@ -55,17 +55,19 @@ file descriptors, CPU and network, and the coordinator combines everything into 
 - 📱 **Zero-install phone workers.** Scan a QR code, tap *Join fleet*, and the browser becomes a
   load generator.
 - 📈 **Self-sizing devices.**
-  - Native workers raise their open-file limit to the kernel maximum and report capacity from it.
+  - Native workers size themselves from the CPU count, within what the open-file limit allows.
   - Browser workers start from the device's own CPU, memory and network, then **auto-tune** to
     the device's real limit during a run.
+- 🛑 **Workers that stop by themselves.** A device that loses the coordinator for 10 seconds
+  stops generating load on its own.
 - ⚖️ **Fair allocation.** Users are split evenly across devices, capped by each device's capacity,
   and rebalanced live as devices join or leave.
 - 🔋 **Full fleet capacity mode.** Every device runs as many users as it can.
 - 📊 **Live dashboard.**
   - Fleet-wide requests/s, failure rate, p50/p95/p99 latency.
   - A per-second chart, per-device load, and top errors.
-- 🕷️ **Automatic path discovery.** The coordinator crawls the target page for same-site links,
-  and you can add extra paths by hand.
+- 🕷️ **Automatic path discovery.** The coordinator crawls the target page for same-site links.
+  You can add paths by hand and leave crawled ones out.
 - 🔐 **Token-protected.** Only devices with the join token can take part or control runs.
 - 🐍 **Locust compatible.** It can still generate a `locustfile.py`, which is all that
   Strezz 0.1 did.
@@ -99,7 +101,7 @@ file descriptors, CPU and network, and the coordinator combines everything into 
    number of concurrent virtual users they can hold.
 3. **Every second**, each worker calls `POST /api/sync`. It sends the stats it collected since the
    last sync and receives its **assignment**: how many users to run, which paths to hit, think
-   time and timeout.
+   time and timeout. A worker whose syncs stop succeeding for 10 seconds stops all its users.
 4. **Workers generate the traffic themselves**, straight to the target over their own network. The
    coordinator never proxies test traffic; it only hands out work and adds up the numbers.
 5. **The coordinator merges** every worker's latency histogram, so fleet-wide percentiles are
@@ -206,12 +208,18 @@ Pass `--no-local-worker` to make it a pure controller.
 1. Connect the device to the **same Wi-Fi** as the coordinator.
 2. Scan the QR code from the terminal or dashboard, or type the `phones` URL, including
    `http://` and the `?token=…` part.
-3. Check the **This device** card. It shows the CPU cores, memory and network the browser
-   reports, and a **recommended starting number of users**.
+3. Check the **This device** card. It shows the CPU cores and, where the browser reports them,
+   the memory and network, plus a **recommended starting number of users**.
 4. Leave **Auto-tune** on to let the page find the device's limit, or untick it and set
    *Max concurrent users* yourself.
-5. Tap **Join fleet**. Keep the tab in the foreground with the screen on. The page requests a
-   screen wake lock, but mobile browsers throttle background tabs heavily.
+5. Tap **Join fleet**. Keep the tab in the foreground with the screen on: mobile browsers
+   throttle background tabs heavily, and a locked phone stops generating load.
+
+**Keeping the screen on.** Browsers only let a page hold the screen awake when it was loaded over
+HTTPS, and the join page normally arrives over plain `http://`. The page tells you which case you
+are in. Over plain HTTP, set the phone's screen timeout (*Auto-Lock* on iOS) to *Never* for the
+duration of the test. Through an [HTTPS tunnel](#devices-outside-your-network) the page keeps the
+screen on by itself.
 
 To leave, tap **Leave fleet** or close the tab. The coordinator moves that device's users to
 other devices within 5 seconds.
@@ -223,16 +231,20 @@ strezz worker --coordinator http://192.168.1.4:4000 --token 3f9a0c1d7e2b
 ```
 
 - The worker raises its open-file limit and prints its capacity:
-  `open-file limit 61440 -> capacity 61376 concurrent users`.
-- Use `--max-users N` to cap it below what the CPU or network can really drive.
+  `capacity 11000 concurrent users (default for 11 CPU cores; --max-users can raise it to 61376)`.
+- Use `--max-users N` to offer more or fewer users than that default
+  (see [Native capacity](#native-capacity)).
 - Use `--name "office-pc"` to label it on the dashboard.
-- Workers reconnect automatically if the coordinator restarts.
+- **If the coordinator stops answering for 10 seconds, the worker stops all its users.** It keeps
+  trying to reconnect, and carries on when the coordinator is back.
+- If the coordinator comes back with a different token, the worker exits with a message. Start
+  it again with the new token, or set `STREZZ_TOKEN` on the coordinator to keep the token stable.
 
 You can also pass settings as environment variables:
 
 ```sh
 export STREZZ_COORDINATOR=http://192.168.1.4:4000 STREZZ_TOKEN=3f9a0c1d7e2b
-strezz worker
+strezz worker                      # STREZZ_MAX_USERS=2000 works like --max-users 2000
 ```
 
 ## Running a test
@@ -243,12 +255,13 @@ strezz worker
 |---|---|---|
 | **Total users** | 200 | Concurrent virtual users across the whole fleet. |
 | **Full fleet capacity** | off | Ignore *Total users* and give every device as many users as it can hold (API: `users: 0`). |
-| **Spawn rate /s** | 50 | Users added per second across the fleet while ramping up. Every device fills its own share within about 20 s, even next to much larger devices. |
+| **Spawn rate /s** | 50 | Users added per second across the whole fleet. The rate is shared between devices according to how many users each still has to start, so the fleet finishes ramping together after about *users ÷ spawn rate* seconds. |
 | **Duration (s)** | 60 | Stop automatically after this many seconds. `0` runs until you press **Stop**. |
-| **Timeout (ms)** | 30000 | A request taking longer than this counts as a failure (`timeout`). |
+| **Timeout (ms)** | 30000 | A request taking longer than this counts as a failure (`timeout`). At least 100. |
 | **Wait min / max (ms)** | 1000 / 3000 | Think time between two requests from the same user. Set both to `0` for maximum pressure, where each user fires back-to-back. |
 
-Starting a new run stops the current one. Workers drop all users from the old run immediately.
+Every setting needs a value: the dashboard won't start a run with an empty box. Starting a new
+run stops the current one. Workers drop all users from the old run immediately.
 
 ### Choosing numbers
 
@@ -259,15 +272,34 @@ Each user sends roughly `1 / (avg response time + avg think time)` requests per 
   concurrent connections.
 - **To find the throughput ceiling**, set the think time to 0 and grow the user count until
   latency or errors climb.
+- **For a gentle ramp**, lower the spawn rate: 1 000 users at 5 per second take 200 seconds to
+  arrive.
 
 ### Which paths are tested
 
 The coordinator loads `--url` and keeps every link on the same site (same scheme, host and port).
-It drops fragments (`#…`), removes duplicates, and always includes `/`. Add more with `--path`:
+It drops fragments (`#…`), removes duplicates, and always includes `/`.
+
+- **Add paths** with `--path`. A path is resolved like a link on the target page and must stay
+  on the target's site; one that leads to another host is skipped with a warning.
+- **Leave crawled paths out** with `--exclude TEXT`, which drops every crawled path containing
+  that text. Use it for links a load test should not hammer: `/logout`, large downloads, admin
+  pages. Paths given with `--path` are always kept.
+- **Skip the crawl** with `--no-crawl` to test only `/` and your `--path` values.
 
 ```sh
-strezz coordinator --url https://shop.example/ --path /api/products --path "/search?q=shoes"
+strezz coordinator --url https://shop.example/ \
+  --path /api/products --path "/search?q=shoes" \
+  --exclude /logout --exclude .zip --exclude /admin/
 ```
+
+**Redirects.** If `--url` redirects within the same site (`http://` to `https://`, or the bare
+domain to `www.`), Strezz says so and tests the address it ended up at. If it redirects to a
+**different site**, such as a single sign-on page on another domain, the coordinator stops with
+an error instead of pointing the fleet at an address you did not name. To test that address on
+purpose, pass it as `--url`.
+
+The crawl gives up after 15 seconds; the coordinator then starts anyway and tests `/` only.
 
 The **Paths** card on the dashboard lists what will be hit. Each request picks a path at random
 with equal probability.
@@ -278,9 +310,10 @@ with equal probability.
 |---|---|
 | **devices · user capacity** | Devices that synced in the last 5 s, and their combined capacity. |
 | **active users** | Users actually running right now. This trails the target during ramp-up. |
-| **requests / s** | Fleet-wide throughput, averaged over the last 5 complete seconds. |
+| **requests / s** | Fleet-wide throughput, averaged over the last 5 complete seconds, including seconds in which no request completed. |
 | **failure rate** | Failed ÷ total requests for the run. |
 | **p50 / p95 / p99** | Latency percentiles across the whole fleet, accurate to about 19% (histogram bucket width). |
+| **Latency by worker type** | Shown when a run has both native and browser workers, because the two time a request differently (see below). |
 | **Chart** | Per-second requests (blue), failures (red) and p95 latency (amber), for the last 3 minutes. |
 | **Devices table** | Per-device capacity, load bar (active ÷ capacity), active / assigned users, req/s, totals. Grey dot = device went silent. |
 | **Top errors** | Most frequent failure reasons, e.g. `HTTP 503`, `timeout`, `Connection reset by peer`, `EMFILE (open-file limit)`. |
@@ -298,21 +331,38 @@ The terminal prints a summary when each run ends:
 | Native | HTTP status ≥ 400, timeout, connection or TLS error, body read error |
 | Browser | Network error or timeout only. Browsers hide cross-origin status codes (see [Limitations](#limitations)). |
 
+### What latency means
+
+| Worker | The clock stops when |
+|---|---|
+| Native | The whole response body has arrived. |
+| Browser | The response headers arrive. The time also includes any wait for one of the browser's few connections to the site. |
+
+The fleet-wide percentiles merge both. In a mixed fleet, read the **Latency by worker type**
+line under the tiles to see them apart (`run.by_kind` in the API).
+
 ## Capacity, allocation and auto-tune
 
 ### Native capacity
 
 On startup a native worker raises its soft `RLIMIT_NOFILE` as high as the kernel allows. The
 per-process maximum is `kern.maxfilesperproc` on macOS and `fs.nr_open` on Linux. It keeps 64
-descriptors in reserve:
+descriptors in reserve. That gives the **ceiling**: one user holds one connection, and one
+connection is one descriptor.
+
+The ceiling is not what a machine can really drive. Every user also costs memory (about 30 KB
+for its own HTTP client before any connection is open), CPU, and one ephemeral port, and the
+open-file limit can be over a million inside a container. So the capacity a worker offers is:
 
 ```
-capacity = open-file limit − 64        (optionally capped by --max-users)
+default:           min(open-file limit − 64,  1 000 × CPU cores,  16 000)
+with --max-users:  min(open-file limit − 64,  --max-users)
 ```
 
-This is an **upper bound from file descriptors only**. A laptop with a 61k-descriptor limit
-cannot actually drive 61k users with zero think time. Use `--max-users` to keep a machine within
-what its CPU and network can handle.
+16 000 stays just inside the ephemeral-port range of macOS and Windows (16 384 ports), which
+bounds how many connections one machine can hold to a single target. `--max-users` (or
+`STREZZ_MAX_USERS`) sets the number yourself, lower or higher than the default. On the
+coordinator it applies to the built-in worker.
 
 ### Browser capacity and auto-tune
 
@@ -320,7 +370,7 @@ what its CPU and network can handle.
 
 ```
 start = CPU cores × 8
-        × 0.25 / 0.5 / 0.75 / 1   if memory ≤ 1 / ≤ 2 / ≤ 4 / > 4 GB  (Chromium only)
+        × 0.25 / 0.5 / 0.75 / 1   if memory ≤ 1 / ≤ 2 / ≤ 4 / > 4 GB  (Chromium over HTTPS only)
         capped at 12 on 3G, 4 on 2G, halved with Data Saver
         clamped to 6 … 256
 ```
@@ -425,8 +475,10 @@ strezz coordinator --url … --public-url https://<random>.trycloudflare.com
 | `EMFILE (open-file limit)` in errors | A worker ran out of descriptors. Lower its users with `--max-users`, or raise the OS limit (Linux: `/etc/security/limits.conf`, Docker: `--ulimit nofile=…`). |
 | Lots of `timeout` / `Connection reset by peer` | The **site** (or a rate limiter or WAF in front of it) is saturated. This is often the result you're looking for. |
 | Phone req/s stops growing at a low number | Browsers allow about 6 connections per host on HTTP/1.1. Auto-tune detects this and holds there. Use a native worker (Termux on Android) for more. |
-| Phone drops out mid-run | The screen locked or the tab went to the background. Keep it in the foreground and plugged in. |
-| `bad token` / 401 | The `?token=` in the URL doesn't match the coordinator's token. Rescan the QR code. Set `STREZZ_TOKEN` to keep the token the same across restarts. |
+| Phone drops out mid-run | The screen locked or the tab went to the background. Keep it in the foreground and plugged in, and set the screen timeout to *Never* (see [Phones, tablets, any browser](#phones-tablets-any-browser)). |
+| `bad token` / 401 | The token doesn't match the coordinator's, usually because the coordinator was restarted and made a new one. The page stops and a native worker exits. Rescan the QR code or restart the worker with the new token. Set `STREZZ_TOKEN` to keep the token the same across restarts. |
+| `no answer from the coordinator … stopping all N users` | The worker lost the coordinator for 10 seconds and stopped its load, as designed. It resumes when the coordinator is reachable again. |
+| The ramp takes longer than you expected | Users arrive at the **spawn rate**, fleet-wide. 10 000 users at 50 per second take 200 seconds. Raise the spawn rate for a faster ramp. |
 | Dashboard says *coordinator unreachable* | The coordinator process stopped, or the address changed. |
 
 ## Docker
@@ -440,7 +492,9 @@ EOF
 docker compose up --build
 ```
 
-The compose file publishes port 4000 and raises `nofile` to 1 048 576.
+The compose file publishes port 4000 and raises `nofile` to 1 048 576. The container's own
+worker still offers 1 000 users per CPU core by default; add `STREZZ_MAX_USERS=20000` to `.env`
+to change that.
 
 Run a worker in a container on another machine:
 
@@ -458,10 +512,13 @@ docker run --rm --ulimit nofile=1048576:1048576 strezz \
 |---|---|---|---|
 | `--url <URL>` | `url` | required | Site under test, crawled for paths. |
 | `--listen <ADDR>` | | `0.0.0.0:4000` | Address to listen on. `0.0.0.0` = reachable from the LAN. |
-| `--token <TOKEN>` | `STREZZ_TOKEN` | random | Join/control token. |
+| `--token <TOKEN>` | `STREZZ_TOKEN` | random | Join/control token. An empty value counts as not set. |
 | `--public-url <URL>` | `STREZZ_PUBLIC_URL` | auto-detected | URL other devices use to reach the coordinator. |
 | `--path <PATH>` | | | Extra path to test (repeatable). |
+| `--exclude <TEXT>` | | | Leave out crawled paths containing this text (repeatable). |
+| `--no-crawl` | | off | Don't crawl; test only `/` and the `--path` values. |
 | `--no-local-worker` | | off | Don't generate load from the coordinator itself. |
+| `--max-users <N>` | `STREZZ_MAX_USERS` | 1 000 per CPU core, at most 16 000 | Concurrent users the coordinator's own worker offers. |
 
 ### `strezz worker`
 
@@ -470,7 +527,9 @@ docker run --rm --ulimit nofile=1048576:1048576 strezz \
 | `--coordinator <URL>` | `STREZZ_COORDINATOR` | required | Coordinator base URL. |
 | `--token <TOKEN>` | `STREZZ_TOKEN` | required | Join token. |
 | `--name <NAME>` | | hostname | Label shown on the dashboard. |
-| `--max-users <N>` | | fd-based capacity | Upper limit on concurrent users. |
+| `--max-users <N>` | `STREZZ_MAX_USERS` | 1 000 per CPU core, at most 16 000 | Concurrent users this worker offers. Never more than the open-file limit allows. |
+
+URLs (`--url`, `--coordinator`, `--public-url`) must start with `http://` or `https://`.
 
 ### `strezz locustfile`
 
@@ -514,7 +573,8 @@ curl -X POST "$C/api/run/stop" -H "x-strezz-token: $T"
 
 `StartRun` fields: `users` is required (`0` = full fleet capacity). The others default to
 `spawn_rate` 50, `duration_secs` 0, `wait_min_ms` 1000, `wait_max_ms` 3000 and
-`timeout_ms` 30000.
+`timeout_ms` 30000. The call returns `400` with a reason if `spawn_rate` is not greater than 0
+or `timeout_ms` is below 100.
 
 ### Worker protocol
 
@@ -527,10 +587,11 @@ Use this to write your own worker.
 // POST /api/sync, once per second
 {
   "worker_id": "a1b2c3d4",
-  "run_id": 3,                 // run the delta belongs to (0 = none)
+  "run_id": 3,                 // run the stats in `delta` were collected in (0 = none)
+  "seq": 42,                   // number of this batch of stats (see the sync rules)
   "active_users": 120,
   "capacity": 500,             // optional: update capacity live
-  "delta": {                   // stats since the previous sync
+  "delta": {                   // a batch of stats
     "requests": 240, "failures": 2, "bytes": 1843200, "latency_sum_ms": 21600.5,
     "hist": [/* 64 bucket counts */],
     "errors": { "HTTP 503": 2 }
@@ -549,22 +610,36 @@ Use this to write your own worker.
 (about 55 s). The upper bound of bucket `i` is `2^((i + 1) / 4) − 1` ms.
 
 **Sync rules:**
-- Sync about once per second.
+- Sync every `sync_interval_ms` (from the register response; one second).
 - Drop all users when `run_id` changes.
-- Converge to `users`, adding at most `spawn_per_sec` per second.
+- Converge to `users`, adding at most `spawn_per_sec` per second. Only request URLs on the
+  target's own origin.
+- **Stop all users when no sync has succeeded for 10 seconds.** Keep trying to sync, and start
+  again from zero when it works.
+- On `404`, stop all users and register again: the coordinator restarted.
+- On `401`, stop for good: the token is wrong.
+- Number each batch of stats with `seq`, counting up from 1. If a sync fails, send the same
+  batch again under the same number, with the `run_id` it was collected in. The coordinator
+  applies each number once, so a retry neither loses stats nor counts them twice. Leaving `seq`
+  out (or 0) means the batch is always applied.
 
 ## Security
 
 - **Token.** Every API call and the dashboard require the join token.
   - Without `--token`, a random 12-character token is generated on each start.
-  - Use a long `STREZZ_TOKEN` if you want it stable.
+  - Use a long `STREZZ_TOKEN` if you want it stable. An empty one is ignored and replaced by a
+    random token.
 - **Plain HTTP.** Traffic to the coordinator, including the token, is unencrypted. Anyone sniffing
   the same Wi-Fi could read it. Use trusted networks, or put the coordinator behind an HTTPS
   tunnel or reverse proxy.
 - **LAN only.** Don't port-forward 4000 to the internet. Anyone with the token could point your
   fleet at a run and start it.
 - **Fixed target.** The target is set when the coordinator starts and can't be changed over the
-  API. Workers only ever hit that one site.
+  API. Workers only request URLs on that site's origin. A `--url` that redirects within the same
+  site is followed; one that redirects to a different site stops the coordinator.
+- **Fail-safe workers.** Stopping the coordinator stops the test: every worker that cannot sync
+  for 10 seconds drops its users, so a crash, a closed laptop or Ctrl-C never leaves devices
+  loading the site.
 - **Shut it down.** Stop the coordinator when you're not testing.
 
 ## Limitations
@@ -573,11 +648,16 @@ Use this to write your own worker.
   `fetch(…, { mode: "no-cors" })`, which still sends a real request but returns an opaque
   response. Browser workers therefore only count network errors and timeouts, and report
   `bytes = 0`.
+- **Browser workers time requests differently.** Their latency ends when the response headers
+  arrive and includes time spent waiting for a free connection, while native workers time the
+  whole response. See [What latency means](#what-latency-means).
 - **Browsers cap connections** at about 6 per host over HTTP/1.1. HTTP/2 and HTTP/3 targets allow
   more concurrent requests per phone.
 - **Background tabs are throttled** by mobile browsers. Keep the join page in the foreground.
-- **Native capacity reflects file descriptors only**, not CPU or bandwidth. Cap big machines
-  with `--max-users`.
+- **Phones lock their screens.** A page loaded over plain HTTP cannot keep the screen on, and
+  cannot read the device's memory either. Set the screen timeout to *Never* while testing.
+- **Native capacity is a rule of thumb.** The default of 1 000 users per CPU core says nothing
+  about your bandwidth or the weight of your pages. Adjust it with `--max-users`.
 - **GET only.** Virtual users request the discovered and configured paths with `GET`. There are
   no logins, forms or scripted user journeys (yet).
 - **One coordinator, one run at a time.** Run history is kept in memory only, and the per-second
@@ -610,7 +690,9 @@ Differences from 0.1:
 ## Development
 
 ```sh
-cargo test                                  # unit tests
+cargo test                                  # Rust tests, including coordinator + worker + site on loopback
+node --test web/join.test.mjs               # the browser worker page, against a stubbed browser
+cargo fmt --check                           # formatting (CI fails on a diff)
 cargo clippy --all-targets -- -D warnings   # lints (CI fails on warnings)
 cargo run -- coordinator --url http://localhost:8080/
 ```
@@ -627,23 +709,26 @@ mkdir -p /tmp/site && cd /tmp/site && echo '<a href="/a">a</a>' > index.html && 
 |---|---|
 | `src/main.rs` | CLI, coordinator startup (crawl, address detection, QR, local worker) |
 | `src/coordinator.rs` | Fleet state, water-filling allocation, stats aggregation, HTTP API |
-| `src/worker.rs` | Native load engine: register/sync loop, ramp-up, virtual users, error classification |
+| `src/worker.rs` | Native load engine: register/sync loop, cut-off, ramp-up, virtual users, error classification |
 | `src/protocol.rs` | Wire types shared by coordinator and workers |
 | `src/stats.rs` | Mergeable log-bucket latency histogram and percentiles |
-| `src/limits.rs` | Raising `RLIMIT_NOFILE` to the kernel maximum; capacity |
+| `src/limits.rs` | Raising `RLIMIT_NOFILE` to the kernel maximum; native capacity |
 | `src/netaddr.rs` | Ranking network interfaces to find the LAN address |
 | `src/crawl.rs` | Same-site link discovery |
 | `src/locust.rs` | Locust file generation |
 | `web/dashboard.html` | Dashboard (embedded with `include_str!`) |
-| `web/join.html` | Browser worker: device profiling, auto-tune, load loop |
+| `web/join.html` | Browser worker: device profiling, auto-tune, load loop, cut-off |
+| `web/join.test.mjs` | Tests for the script in `web/join.html` |
+| `src/testutil.rs` | Test helper: HTTP servers on loopback that can be shut down |
 
-**Histogram constant.** `src/stats.rs` and `web/join.html` share the histogram formula. If you
-change it, change both.
+**Shared rules.** `src/stats.rs` and `web/join.html` share the histogram formula, and
+`src/worker.rs` and `web/join.html` share the 10-second cut-off. If you change one, change both.
 
 ### CI
 
 GitHub Actions runs `cargo clippy -D warnings` and `cargo test` on Linux, macOS and Windows for
-every push and pull request to `master`. CodeQL scans the Rust code.
+every push and pull request to `master`, plus `cargo fmt --check` and the page tests on Linux.
+CodeQL scans the Rust code and the scripts in `web/`.
 
 ## FAQ
 

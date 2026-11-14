@@ -69,10 +69,6 @@ impl Stats {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.requests == 0
-    }
-
     /// Estimated latency percentile (`p` in 0..=100), in ms.
     pub fn percentile(&self, p: f64) -> f64 {
         let total: u64 = self.hist.iter().sum();

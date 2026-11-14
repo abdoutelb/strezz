@@ -12,3 +12,10 @@ updates:
     interval: daily
     time: "03:00"
   open-pull-requests-limit: 10
+# The actions used by the workflows in .github/workflows. Without this entry
+# nothing bumps them, which is how CodeQL ended up on a retired version.
+- package-ecosystem: github-actions
+  directory: "/"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10

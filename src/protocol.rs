@@ -41,13 +41,20 @@ pub struct RegisterResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRequest {
     pub worker_id: String,
-    /// The run the stats delta belongs to (0 = none).
+    /// The run the stats in `delta` were collected in (0 = none). Usually the
+    /// run in progress, but a batch delayed by failed syncs may be older.
     pub run_id: u64,
     /// Virtual users currently alive on the worker.
     pub active_users: u32,
-    /// Stats collected since the previous sync.
+    /// A batch of stats collected by this worker.
     #[serde(default)]
     pub delta: Stats,
+    /// Number of that batch, counting up from 1. A batch whose sync failed is
+    /// sent again unchanged under the same number, and the coordinator applies
+    /// each number once, so a retry can neither lose stats nor count them
+    /// twice. 0 (or absent) means "not numbered": always applied.
+    #[serde(default)]
+    pub seq: u64,
     /// Updated capacity, for workers that tune themselves (browser auto-tune).
     #[serde(default)]
     pub capacity: Option<u32>,
@@ -98,6 +105,27 @@ pub struct StartRun {
     pub timeout_ms: u64,
 }
 
+/// Shortest request timeout a run may ask for.
+pub const MIN_TIMEOUT_MS: u64 = 100;
+
+impl StartRun {
+    /// Check the settings a run cannot work with, and tidy the rest.
+    ///
+    /// The dashboard's form applies the same limits, but the API is also
+    /// called by scripts, and a value of 0 here does not mean "off": a spawn
+    /// rate of 0 never starts anyone and a timeout of 0 fails every request.
+    pub fn validated(mut self) -> Result<Self, String> {
+        if !self.spawn_rate.is_finite() || self.spawn_rate <= 0.0 {
+            return Err("spawn_rate must be greater than 0".into());
+        }
+        if self.timeout_ms < MIN_TIMEOUT_MS {
+            return Err(format!("timeout_ms must be at least {MIN_TIMEOUT_MS}"));
+        }
+        self.wait_max_ms = self.wait_max_ms.max(self.wait_min_ms);
+        Ok(self)
+    }
+}
+
 fn default_spawn_rate() -> f64 {
     50.0
 }
@@ -109,4 +137,45 @@ fn default_wait_max() -> u64 {
 }
 fn default_timeout() -> u64 {
     30_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run() -> StartRun {
+        serde_json::from_str(r#"{"users": 10}"#).unwrap()
+    }
+
+    #[test]
+    fn defaults_are_valid() {
+        let cfg = run().validated().unwrap();
+        assert_eq!((cfg.spawn_rate, cfg.timeout_ms), (50.0, 30_000));
+    }
+
+    #[test]
+    fn settings_that_cannot_run_are_rejected() {
+        for spawn_rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let cfg = StartRun {
+                spawn_rate,
+                ..run()
+            };
+            assert!(cfg.validated().is_err(), "spawn_rate {spawn_rate}");
+        }
+        let cfg = StartRun {
+            timeout_ms: 0,
+            ..run()
+        };
+        assert!(cfg.validated().unwrap_err().contains("timeout_ms"));
+    }
+
+    #[test]
+    fn a_wait_range_given_backwards_is_straightened() {
+        let cfg = StartRun {
+            wait_min_ms: 500,
+            wait_max_ms: 100,
+            ..run()
+        };
+        assert_eq!(cfg.validated().unwrap().wait_max_ms, 500);
+    }
 }
