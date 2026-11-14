@@ -105,7 +105,13 @@ function open({ replyAfterMs = 10, assignment = RUN } = {}) {
     unreported: () =>
       peek("delta.requests + waiting.reduce((n, b) => n + b.delta.requests, 0) + (sending ? sending.delta.requests : 0)"),
     /** Resolves when the page's next sync request reaches the coordinator. */
-    nextSync: () => new Promise((resolve) => waitingForSync.push(resolve)),
+    nextSync: () =>
+      new Promise((resolve, reject) => {
+        // The page's own timers are unref'd, so while a test only waits on them nothing
+        // would keep Node running. This timer does, and fails the test if no sync comes.
+        const deadline = setTimeout(() => reject(new Error("no sync within 10 s")), 10000);
+        waitingForSync.push(() => { clearTimeout(deadline); resolve(); });
+      }),
     /** Requests the site under test receives during the next `ms`. */
     async hitsDuring(ms) {
       const before = seen.hits;
