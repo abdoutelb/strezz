@@ -9,7 +9,7 @@ mod worker;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use rand::Rng;
+use rand::RngExt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use url::Url;
@@ -98,9 +98,9 @@ async fn main() -> Result<()> {
             println!("target {url}: {} paths", paths.len());
 
             let token = token.unwrap_or_else(|| {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 (0..12)
-                    .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
+                    .map(|_| format!("{:x}", rng.random::<u8>() % 16))
                     .collect()
             });
             let state = Arc::new(Mutex::new(coordinator::Coordinator::new(

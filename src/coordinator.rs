@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -152,9 +152,9 @@ impl Coordinator {
 
     pub fn register(&mut self, req: RegisterRequest) -> RegisterResponse {
         let id: String = {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             (0..8)
-                .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
+                .map(|_| format!("{:x}", rng.random::<u8>() % 16))
                 .collect()
         };
         let now = Instant::now();

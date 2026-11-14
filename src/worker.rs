@@ -5,8 +5,8 @@ use crate::limits;
 use crate::protocol::*;
 use crate::stats::Stats;
 use anyhow::{bail, Context, Result};
-use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::seq::IndexedRandom;
+use rand::RngExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -212,11 +212,11 @@ async fn virtual_user(target: Url, plan: Arc<Assignment>, shared: Arc<Shared>) {
     }
 
     // Stagger the first request so a ramp doesn't fire in lockstep.
-    let jitter = rand::thread_rng().gen_range(0..=plan.wait_max_ms.min(1000));
+    let jitter = rand::rng().random_range(0..=plan.wait_max_ms.min(1000));
     tokio::time::sleep(Duration::from_millis(jitter)).await;
 
     loop {
-        let url = paths.choose(&mut rand::thread_rng()).unwrap().clone();
+        let url = paths.choose(&mut rand::rng()).unwrap().clone();
         let started = Instant::now();
         let (bytes, error) = match client.get(url).send().await {
             Ok(resp) => {
@@ -234,7 +234,7 @@ async fn virtual_user(target: Url, plan: Arc<Assignment>, shared: Arc<Shared>) {
         shared.stats.lock().unwrap().record(ms, bytes, error);
 
         let wait = if plan.wait_max_ms > plan.wait_min_ms {
-            rand::thread_rng().gen_range(plan.wait_min_ms..=plan.wait_max_ms)
+            rand::rng().random_range(plan.wait_min_ms..=plan.wait_max_ms)
         } else {
             plan.wait_min_ms
         };
