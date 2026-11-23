@@ -13,7 +13,7 @@ axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 gethostname = "1.1"
 local-ip-address = "0.6"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.15", default-features = false, features = ["svg"] }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 scraper = "0.29"
